@@ -1,0 +1,17 @@
+openai
+langgraph
+langchain-core
+langchain-openai
+pydantic>=2.0.0
+networkx
+python-dotenv
+fastapi
+uvicorn
+pytest
+streamlit
+requests
+langchain-anthropic
+langchain-google-genai
+langchain-groq
+langchain-community
+ddgs
