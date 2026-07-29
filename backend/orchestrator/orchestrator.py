@@ -2,12 +2,21 @@ from langgraph.graph import StateGraph, END
 from config.config import Config
 from orchestrator.state import OrchestratorState
 from orchestrator.goal_intake import goal_intake_node
+from orchestrator.clarification import clarification_exit_node, goal_needs_clarification
 from orchestrator.task_graph import task_graph_node
 from orchestrator.execution_engine import execution_engine_node
 from orchestrator.evaluator import evaluator_node
 from orchestrator.replanner import replanner_node
 from orchestrator.result_assembly import result_assembly_node
 from storage.state_store import StateStore
+
+
+def goal_intake_router(state: OrchestratorState) -> str:
+    """Pause the pipeline when the goal is too vague to plan."""
+    if goal_needs_clarification(state):
+        return "clarification_exit"
+    return "task_graph"
+
 
 def evaluator_router(state: OrchestratorState) -> str:
     """Conditional router edge following the Evaluator node.
@@ -48,19 +57,28 @@ def compile_orchestrator():
     
     # Register stage nodes
     workflow.add_node("goal_intake", goal_intake_node)
+    workflow.add_node("clarification_exit", clarification_exit_node)
     workflow.add_node("task_graph", task_graph_node)
     workflow.add_node("execution_engine", execution_engine_node)
     workflow.add_node("evaluator", evaluator_node)
     workflow.add_node("replanner", replanner_node)
     workflow.add_node("result_assembly", result_assembly_node)
-    
+
     # Build graph topology
     workflow.set_entry_point("goal_intake")
-    
-    workflow.add_edge("goal_intake", "task_graph")
+
+    workflow.add_conditional_edges(
+        "goal_intake",
+        goal_intake_router,
+        {
+            "clarification_exit": "clarification_exit",
+            "task_graph": "task_graph",
+        },
+    )
+    workflow.add_edge("clarification_exit", END)
     workflow.add_edge("task_graph", "execution_engine")
     workflow.add_edge("execution_engine", "evaluator")
-    
+
     # Conditional routing edge following evaluator stage
     workflow.add_conditional_edges(
         "evaluator",
@@ -68,13 +86,13 @@ def compile_orchestrator():
         {
             "replanner": "replanner",
             "execution_engine": "execution_engine",
-            "result_assembly": "result_assembly"
-        }
+            "result_assembly": "result_assembly",
+        },
     )
-    
+
     # Loops back to execution engine after replanning
     workflow.add_edge("replanner", "execution_engine")
     workflow.add_edge("result_assembly", END)
-    
+
     # Compile the workflow graph
     return workflow.compile()

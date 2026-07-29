@@ -9,6 +9,7 @@ from storage.workflow_store import WorkflowStore
 from utils.logging import AuditLogger
 from config.prompts import GOAL_INTAKE_SYSTEM_PROMPT
 from config.config import get_chat_model
+from orchestrator.clarification import apply_clarification_heuristic
 from utils.llm import invoke_structured
 
 
@@ -56,7 +57,17 @@ def goal_intake_node(state: OrchestratorState) -> OrchestratorState:
         workflow_store.fail_stage(run_id, "goal_intake", str(e))
         raise
 
+    # Heuristic fallback if the model invents work for an empty/vague prompt.
+    goal = apply_clarification_heuristic(goal, prompt)
+
     workflow_store.set_goal(run_id, goal)
-    logger.log("GoalIntake", "stage_completed", {"title": goal.title})
+    logger.log(
+        "GoalIntake",
+        "stage_completed",
+        {
+            "title": goal.title,
+            "needs_clarification": goal.needs_clarification,
+        },
+    )
 
     return {**state, "goal": goal}

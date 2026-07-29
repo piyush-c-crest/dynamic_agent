@@ -118,10 +118,10 @@ def _normalize_workflow_for_api(workflow: Dict[str, Any]) -> Dict[str, Any]:
     """Heal display inconsistencies for finished runs (legacy + edge cases)."""
     status = (workflow.get("status") or "").lower()
     stages = workflow.get("stages") or {}
-    if status in {"success", "failed", "partial_failure", "completed"}:
+    if status in {"success", "failed", "partial_failure", "completed", "needs_clarification"}:
         ar = stages.get("agent_resolution")
         if isinstance(ar, dict) and ar.get("status") == "running":
-            ar = {**ar, "status": "completed"}
+            ar = {**ar, "status": "completed" if status != "needs_clarification" else "skipped"}
             stages = {**stages, "agent_resolution": ar}
             workflow = {**workflow, "stages": stages}
 

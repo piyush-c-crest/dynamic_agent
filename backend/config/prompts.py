@@ -7,7 +7,25 @@ You should define:
 2. Description: The core request mapped clearly.
 3. Deliverables: Concrete, atomic deliverables that will satisfy the request.
 4. Constraints: Any explicit or implicit constraints (e.g. timeframes, bounds).
-5. Assumptions: Assumptions made to clarify ambiguity without stalling the execution.
+5. Assumptions: Assumptions made only when the request is still actionable.
+6. needs_clarification: true when the request is a greeting, empty, nonsense, or too vague to plan concrete work.
+7. clarification_question: if needs_clarification is true, ask one clear question that would make the goal actionable.
+
+When to set needs_clarification=true (do NOT invent fake deliverables):
+- Greetings / chit-chat ("hi", "hello", "how are you")
+- No actionable task ("help", "test", "asdf")
+- Missing what to produce and about what topic
+
+When needs_clarification=true:
+- Title may be "Unclear request"
+- deliverables and constraints should be empty lists
+- Put a short note in assumptions
+- Write clarification_question as a direct question to the user
+
+When the request IS actionable:
+- needs_clarification=false
+- clarification_question=null
+- Fill deliverables with concrete Markdown (.md) outcomes
 
 File-output rule: this system currently supports Markdown (.md) deliverables only.
 If the user asks for .html, .docx, .csv, or similar, still list an equivalent .md report deliverable.

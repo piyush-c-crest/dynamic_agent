@@ -27,6 +27,8 @@ STATUS_COLORS = {
     "pending": "#94a3b8",
     "failed": "#dc2626",
     "partial_failure": "#d97706",
+    "needs_clarification": "#d97706",
+    "skipped": "#94a3b8",
 }
 
 
@@ -186,16 +188,12 @@ def inject_theme_css() -> None:
             margin: 0.4rem auto 0.4rem 0;
             max-width: 92%;
         }
-        /* Hide Streamlit chrome: Deploy, Rerun, cache, print, record, etc. */
+        /* Hide Streamlit chrome but keep sidebar toggle visible */
         #MainMenu {visibility: hidden !important;}
         footer {visibility: hidden !important;}
-        header [data-testid="stToolbar"] {display: none !important;}
-        div[data-testid="stToolbar"] {display: none !important;}
         [data-testid="stDecoration"] {display: none !important;}
         [data-testid="stStatusWidget"] {display: none !important;}
         .stDeployButton, [data-testid="stAppDeployButton"] {display: none !important;}
-        button[kind="header"] {display: none !important;}
-        [data-testid="stHeaderActionElements"] {display: none !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -286,19 +284,36 @@ def render_goal(goal: Optional[Dict[str, Any]]) -> None:
     st.subheader("Goal")
     st.markdown(f"**{goal.get('title', 'Untitled')}**")
     st.write(goal.get("description", ""))
+
+    if goal.get("needs_clarification"):
+        question = goal.get("clarification_question") or "Please clarify what you want done."
+        st.warning(f"**Clarification needed:** {question}")
+
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**Deliverables**")
-        for item in goal.get("deliverables") or []:
-            st.write(f"- {item}")
+        items = goal.get("deliverables") or []
+        if items:
+            for item in items:
+                st.write(f"- {item}")
+        else:
+            st.caption("—")
     with cols[1]:
         st.markdown("**Constraints**")
-        for item in goal.get("constraints") or []:
-            st.write(f"- {item}")
+        items = goal.get("constraints") or []
+        if items:
+            for item in items:
+                st.write(f"- {item}")
+        else:
+            st.caption("—")
     with cols[2]:
         st.markdown("**Assumptions**")
-        for item in goal.get("assumptions") or []:
-            st.write(f"- {item}")
+        items = goal.get("assumptions") or []
+        if items:
+            for item in items:
+                st.write(f"- {item}")
+        else:
+            st.caption("—")
 
 
 def render_workflow_view(workflow: Dict[str, Any], stages_order: Optional[List[str]] = None) -> None:
@@ -314,6 +329,12 @@ def render_workflow_view(workflow: Dict[str, Any], stages_order: Optional[List[s
             st.caption(prompt)
     with header_cols[1]:
         st.markdown(status_badge(workflow.get("status")), unsafe_allow_html=True)
+
+    if (workflow.get("status") or "").lower() == "needs_clarification":
+        st.info(
+            "This run paused after Goal Intake. Reply in Chat with a clearer task "
+            "(topic + desired Markdown deliverable)."
+        )
 
     render_goal(workflow.get("goal"))
     render_stages(workflow.get("stages") or {}, stages_order)
@@ -333,4 +354,10 @@ def render_workflow_view(workflow: Dict[str, Any], stages_order: Optional[List[s
 
 
 def is_terminal(status: Optional[str]) -> bool:
-    return (status or "").lower() in {"success", "failed", "partial_failure", "completed"}
+    return (status or "").lower() in {
+        "success",
+        "failed",
+        "partial_failure",
+        "completed",
+        "needs_clarification",
+    }

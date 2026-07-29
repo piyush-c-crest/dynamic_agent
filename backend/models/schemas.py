@@ -8,6 +8,14 @@ class Goal(BaseModel):
     deliverables: List[str] = Field(default_factory=list, description="Concrete outputs to be produced")
     constraints: List[str] = Field(default_factory=list, description="Key constraints and limitations")
     assumptions: List[str] = Field(default_factory=list, description="Assumptions made about the request")
+    needs_clarification: bool = Field(
+        False,
+        description="True when the request is too vague/incomplete to plan work",
+    )
+    clarification_question: Optional[str] = Field(
+        None,
+        description="Question to ask the user when needs_clarification is true",
+    )
 
 class Task(BaseModel):
     """Atomic task element in the TaskGraph DAG."""

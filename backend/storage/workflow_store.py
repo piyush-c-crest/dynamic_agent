@@ -221,6 +221,23 @@ class WorkflowStore:
         workflow["output_files"] = output_files
         self._save(run_id, workflow)
 
+    def finalize_needs_clarification(self, run_id: str, final_response: str) -> None:
+        """Stop the run after goal intake; skip remaining stages."""
+        workflow = self._load(run_id)
+        now = datetime.utcnow().isoformat()
+        for name, entry in workflow["stages"].items():
+            if name == "goal_intake":
+                continue
+            if entry.get("status") in {"completed", "failed"}:
+                continue
+            entry["status"] = "skipped"
+            entry["completed_at"] = now
+            entry.setdefault("details", {})["note"] = "Skipped — awaiting clearer goal"
+        workflow["status"] = "needs_clarification"
+        workflow["final_response"] = final_response
+        workflow["output_files"] = []
+        self._save(run_id, workflow)
+
     def get_workflow(self, run_id: str) -> dict:
         return self._load(run_id)
 

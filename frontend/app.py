@@ -101,5 +101,7 @@ if run_id:
         if not is_terminal(status):
             time.sleep(2)
             st.rerun()
+        elif (status or "").lower() == "needs_clarification":
+            st.warning("Goal is unclear — send a clearer follow-up message to start a new run.")
         else:
             st.success("Run finished. Open History for a persistent record.")
