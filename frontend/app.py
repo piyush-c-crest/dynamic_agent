@@ -12,8 +12,8 @@ import time
 
 import streamlit as st
 
-from sidebar import build_llm_settings_for_chat, llm_settings_required, render_sidebar
-from ui_components import (
+from components.sidebar import build_llm_settings_for_chat, llm_settings_required, render_sidebar
+from components.ui_components import (
     inject_theme_css,
     is_terminal,
     render_workflow_view,
