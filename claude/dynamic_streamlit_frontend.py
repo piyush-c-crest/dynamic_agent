@@ -82,7 +82,14 @@ for thread_id in st.session_state['chat_threads'][::-1]:
 
 # --- Available Tools ---
 st.sidebar.header('🔧 Available Tools')
-st.sidebar.info(agent_manager.get_tool_info())
+try:
+    tools_dict = json.loads(agent_manager.get_tool_info())
+    for t_name, t_desc in tools_dict.items():
+        with st.sidebar.container():
+            st.markdown(f"**🛠️ {t_name}**")
+            st.caption(t_desc)
+except Exception:
+    st.sidebar.info(agent_manager.get_tool_info())
 
 # --- Dynamic Tool Creation ---
 st.sidebar.header('➕ Add New Tool')
