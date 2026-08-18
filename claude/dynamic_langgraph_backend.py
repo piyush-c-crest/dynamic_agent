@@ -9,6 +9,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool, Tool, BaseTool
 from dotenv import load_dotenv
+import os
 import sqlite3
 import requests
 import json
@@ -17,6 +18,14 @@ from datetime import datetime
 from langchain_groq import ChatGroq
 
 load_dotenv()
+
+# -------------------
+# LangSmith Setup
+# -------------------
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
+# Make sure to add LANGCHAIN_API_KEY to your .env file
 
 # -------------------
 # 5. State Definition
@@ -262,6 +271,13 @@ class DynamicAgentManager:
         messages = state["messages"]
         self.llm_with_tools = llm.bind_tools(self.tool_registry.get_all_tools())
         response = self.llm_with_tools.invoke(messages)
+        
+        # DEBUG
+        print("\n========== LLM RESPONSE ==========")
+        print("Content:", response.content)
+        print("Tool calls:", response.tool_calls)
+        print("==================================\n")
+
         return {"messages": [response]}
     
     def add_tool_from_prompt(self, prompt: str, tool_name: str):
