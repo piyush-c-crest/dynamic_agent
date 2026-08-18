@@ -5,3 +5,6 @@ logs/
 __pycache__/
 runs/
 venv
+*.db
+*.db-shm
+*.db-wal

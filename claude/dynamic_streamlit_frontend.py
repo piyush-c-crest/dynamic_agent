@@ -1,7 +1,7 @@
 # dynamic_streamlit_frontend.py
 
 import streamlit as st
-from dynamic_langgraph_backend import agent_manager, run_agent_with_requirements
+from dynamic_langgraph_backend import agent_manager
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
@@ -40,14 +40,11 @@ if 'chat_threads' not in st.session_state:
 if 'dynamic_requirements' not in st.session_state:
     st.session_state['dynamic_requirements'] = {}
 
-if 'available_tools' not in st.session_state:
-    st.session_state['available_tools'] = agent_manager.get_tool_info()
-
 add_thread(st.session_state['thread_id'])
 
 # ======================================== Sidebar UI =======================================
 
-st.sidebar.title('🤖 Dynamic AI Agent')
+st.sidebar.title('🤖 Dynamic Multi-Agent Orchestrator')
 
 # --- Chat Management ---
 col1, col2 = st.sidebar.columns(2)
@@ -68,15 +65,17 @@ for thread_id in st.session_state['chat_threads'][::-1]:
     if st.sidebar.button(str(thread_id)[:8] + '...'):
         st.session_state['thread_id'] = thread_id
         messages = load_conversation(thread_id)
-        
+
         temp_messages = []
         for msg in messages:
             if isinstance(msg, HumanMessage):
                 role = 'user'
-            else:
+            elif isinstance(msg, AIMessage) and msg.content:
                 role = 'assistant'
+            else:
+                continue
             temp_messages.append({'role': role, 'content': msg.content})
-        
+
         st.session_state['message_history'] = temp_messages
         st.rerun()
 
@@ -91,6 +90,20 @@ try:
 except Exception:
     st.sidebar.info(agent_manager.get_tool_info())
 
+# --- Dynamically Created Agents ---
+st.sidebar.header('🧠 Active Agents')
+try:
+    agents_dict = json.loads(agent_manager.get_agent_info())
+    if agents_dict:
+        for role, cfg in agents_dict.items():
+            with st.sidebar.container():
+                st.markdown(f"**🧬 {role}**")
+                st.caption(f"Tools: {', '.join(cfg['tools']) if cfg['tools'] else 'none'}")
+    else:
+        st.sidebar.caption("No agents created yet — send a message to trigger planning.")
+except Exception:
+    st.sidebar.caption("No agents created yet.")
+
 # --- Dynamic Tool Creation ---
 st.sidebar.header('➕ Add New Tool')
 with st.sidebar.expander('Create Tool from Prompt'):
@@ -100,14 +113,13 @@ with st.sidebar.expander('Create Tool from Prompt'):
         height=100,
         key='tool_prompt'
     )
-    
+
     if st.button('Create Tool', key='create_tool_btn'):
         if tool_name and tool_prompt:
             with st.spinner(f'Creating tool "{tool_name}"...'):
                 success = agent_manager.add_tool_from_prompt(tool_prompt, tool_name)
                 if success:
                     st.success(f'✅ Tool "{tool_name}" created!')
-                    st.session_state['available_tools'] = agent_manager.get_tool_info()
                     st.rerun()
                 else:
                     st.error(f'❌ Failed to create tool')
@@ -117,31 +129,30 @@ with st.sidebar.expander('Create Tool from Prompt'):
 # --- Dynamic Behavior Settings ---
 st.sidebar.header('⚙️ Dynamic Settings')
 with st.sidebar.expander('Configure Agent Behavior'):
-    
-    # Enable/Disable specific behaviors
+
     enable_preprocessing = st.checkbox(
-        'Enable Message Preprocessing',
+        'Enable Extra Planning Instruction',
         value=False,
         key='enable_preprocessing'
     )
-    
+
     if enable_preprocessing:
         preprocessing_instruction = st.text_area(
-            'Preprocessing instruction:',
+            'Instruction (folded into the planning step):',
             height=50,
             key='preprocessing_instruction'
         )
         st.session_state['dynamic_requirements']['preprocessing'] = preprocessing_instruction
-    
-    # Custom behavior type
+    else:
+        st.session_state['dynamic_requirements'].pop('preprocessing', None)
+
     behavior_type = st.selectbox(
         'Agent Behavior:',
         ['Standard', 'Detailed', 'Concise', 'Code-Focus', 'Creative'],
         key='behavior_type'
     )
     st.session_state['dynamic_requirements']['dynamic_behavior'] = behavior_type.lower()
-    
-    # Temperature/Creativity
+
     temperature = st.slider(
         'Temperature (Creativity)',
         min_value=0.0,
@@ -154,14 +165,13 @@ with st.sidebar.expander('Configure Agent Behavior'):
 
 # ======================================== Main Chat UI =====================================
 
-st.title('🚀 Dynamic AI Agent')
+st.title('🚀 Dynamic Multi-Agent Orchestrator')
 
-# Display current configuration
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric('Tools Available', len(json.loads(agent_manager.get_tool_info())))
 with col2:
-    st.metric('Thread ID', st.session_state['thread_id'][:8] + '...')
+    st.metric('Agents Created', len(json.loads(agent_manager.get_agent_info())))
 with col3:
     st.metric('Messages', len(st.session_state['message_history']))
 
@@ -173,67 +183,102 @@ for message in st.session_state['message_history']:
         st.markdown(message['content'])
 
 # --- Chat Input ---
-user_input = st.chat_input('Type your message or request a new tool...')
+user_input = st.chat_input('Describe your goal (e.g. "research X and summarize it")...')
 
 if user_input:
-    
-    # Check if user is requesting a new tool
-    if any(phrase in user_input.lower() for phrase in ['create tool', 'add tool', 'new tool', 'make tool']):
-        st.info('📝 Tool creation requested! Use the sidebar to create a new tool.')
-    
-    # Add user message
     st.session_state['message_history'].append({'role': 'user', 'content': user_input})
     with st.chat_message('user'):
         st.markdown(user_input)
-    
-    # Prepare configuration
+
+    # Apply dynamic settings for this run (fixes the previous bug where these
+    # sidebar controls were built but never actually reached the backend)
+    reqs = st.session_state.get('dynamic_requirements', {})
+    if 'dynamic_behavior' in reqs:
+        agent_manager.set_behavior_style(reqs['dynamic_behavior'])
+    if 'preprocessing' in reqs:
+        agent_manager.set_extra_instruction(reqs['preprocessing'])
+    if 'temperature' in reqs:
+        agent_manager.set_temperature(reqs['temperature'])
+
     config = {'configurable': {'thread_id': st.session_state['thread_id']}}
-    
-    # Display assistant response with streaming
+
     with st.chat_message('assistant'):
-        def ai_stream():
-            for message_chunk, metadata in agent_manager.chatbot.stream(
-                {"messages": [HumanMessage(content=user_input)]},
-                config=config,
-                stream_mode="messages"
-            ):
-                if isinstance(message_chunk, AIMessage):
-                    yield message_chunk.content
-        
-        ai_message = st.write_stream(ai_stream())
-    
-    # Store assistant response
-    if ai_message:
-        st.session_state['message_history'].append({'role': 'assistant', 'content': ai_message})
+        plan_box = st.empty()
+        status_box = st.empty()
+        answer_box = st.empty()
+
+        final_answer = ""
+        task_plan = []
+
+        # stream_mode="updates" yields {node_name: node_output} after each node
+        # runs, which lets us show the plan, which agent is working, and
+        # evaluator verdicts live as the workflow executes.
+        for update in agent_manager.chatbot.stream(
+            {"messages": [HumanMessage(content=user_input)]},
+            config=config,
+            stream_mode="updates",
+        ):
+            for node_name, node_output in update.items():
+
+                if node_name == "planner":
+                    task_plan = node_output.get("task_plan", [])
+                    with plan_box.container():
+                        st.markdown("**🗂️ Task Plan**")
+                        for t in task_plan:
+                            st.markdown(f"- `{t['id']}` **[{t['agent_role']}]** {t['description']}")
+
+                elif node_name == "agent_executor":
+                    status_box.markdown("🤖 An agent is working on the current task...")
+
+                elif node_name == "tools":
+                    status_box.markdown("🔧 Executing tool call(s)...")
+
+                elif node_name == "evaluator":
+                    verdict = node_output.get("last_verdict", {})
+                    status = verdict.get("status", "PASS")
+                    if status == "RETRY":
+                        status_box.markdown(f"🔁 Evaluator requested a retry: {verdict.get('reason', '')}")
+                    else:
+                        status_box.markdown(f"✅ Task evaluated: {verdict.get('reason', 'looks good')}")
+
+                elif node_name == "assembler":
+                    msgs = node_output.get("messages", [])
+                    if msgs:
+                        final_answer = msgs[-1].content
+                        answer_box.markdown(final_answer)
+
+        status_box.empty()
+
+    if final_answer:
+        st.session_state['message_history'].append({'role': 'assistant', 'content': final_answer})
 
 # --- Footer with Instructions ---
 with st.expander('📖 How to Use'):
     st.markdown("""
-    ### Dynamic Agent Features:
-    
-    1. **Create Tools Dynamically**
-       - Use the "Add New Tool" section in the sidebar
-       - Describe what you want the tool to do
-       - Agent creates and registers it automatically
-    
-    2. **Configure Behavior**
-       - Change agent behavior type (Detailed, Concise, etc.)
-       - Adjust temperature for creativity level
-       - Enable preprocessing for custom message handling
-    
-    3. **Multi-Tool Conversations**
-       - Ask questions that require multiple tools
-       - Agent automatically uses the right tools
-       - Tools are persistent across conversations
-    
-    4. **Thread Management**
-       - Each conversation is saved separately
-       - Switch between conversations instantly
-       - All tool usage is logged in SQLite
-    
+    ### Dynamic Orchestration Features:
+
+    1. **Automatic Task Decomposition**
+       - Every message is treated as a goal and broken into a task plan
+       - Each task is tagged with the type of specialist agent it needs
+
+    2. **Dynamic Agent Creation**
+       - New specialist agents (with their own system prompt and tool subset)
+         are created the first time a role is needed, and reused after that
+       - See them appear live in the **🧠 Active Agents** sidebar panel
+
+    3. **Evaluation & Self-Correction**
+       - Each task's output is evaluated before being accepted
+       - Failing outputs trigger an automatic retry with feedback (up to 2 retries)
+
+    4. **Create Tools Dynamically**
+       - Use "Add New Tool" in the sidebar; new agents can pick up new tools automatically
+
+    5. **Configure Behavior**
+       - Behavior style and extra instructions now actually reach the planner/agents
+       - Temperature is applied to the underlying LLM before each run
+
     ### Example Prompts:
-    - "Create a tool that converts currencies"
-    - "Add a tool for sentiment analysis"
-    - "Make a weather tool for any city"
-    - "Build a tool that summarizes text"
+    - "Research the current price of AAPL stock and explain if it's a good time to buy"
+    - "Calculate 15% tip on a $84.50 bill and explain the math"
+    - "Search for the latest news on renewable energy and summarize the key points"
     """)
