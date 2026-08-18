@@ -92,7 +92,18 @@ class DynamicToolRegistry:
         self.register_tool("stock_price", self._stock_price_tool())
 
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
-        """Register a tool in the registry"""
+        """
+        Register a tool in the registry.
+
+        Forces tool_obj.name to match the registry key. Without this, a tool
+        whose underlying function is named differently from its registry key
+        (e.g. get_stock_price registered under "stock_price", or any
+        LLM-generated tool whose function name differs from the name typed
+        in the UI) will bind to the LLM under its *real* name, so tool_calls
+        come back with a name the registry doesn't recognize and
+        `_tools_node` reports "tool not found" even though the tool exists.
+        """
+        tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
         print(f"✅ Tool registered: {name}")
@@ -139,7 +150,9 @@ class DynamicToolRegistry:
         @tool
         def get_stock_price(symbol: str) -> dict:
             """Fetch stock price for a symbol (e.g., AAPL, TSLA)"""
-            api_key = "C9PE94QUEW9VWGFM"
+            api_key = os.environ.get("ALPHAVANTAGE_API_KEY")
+            if not api_key:
+                return {"error": "ALPHAVANTAGE_API_KEY not set in environment"}
             url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
             try:
                 r = requests.get(url, timeout=5)
@@ -242,8 +255,57 @@ class DynamicAgentFactory:
 
     def get_or_create(self, role: str, task_description: str) -> dict:
         if role in self.agents:
-            return self.agents[role]
+            return self.refresh_tools(role, task_description)
         return self.create_agent(role, task_description)
+
+    def refresh_tools(self, role: str, task_description: str) -> dict:
+        """
+        Re-check an existing agent's tool set against the *current* tool
+        registry and the *current* task.
+
+        Without this, an agent's tools are decided once from whatever the
+        first task it ever handled needed, and never revisited — so (a) a
+        role reused later for a task needing a different tool stays stuck
+        without it, and (b) a tool added from the sidebar after the role
+        already exists is invisible to it forever. This only ever expands
+        the tool set (never removes tools), and skips the rebind entirely
+        if nothing changed.
+        """
+        agent_conf = self.agents[role]
+        available_tools = self.tool_registry.list_tools()
+
+        selection_prompt = f"""
+The "{role}" agent currently has these tools: {agent_conf['tool_names']}
+It now needs to handle this task: "{task_description}"
+
+Available tools (name: description): {json.dumps(available_tools)}
+
+Return ONLY JSON in this exact shape:
+{{"tools": ["tool_name1", "tool_name2"]}}
+
+List ALL tools this agent should have going forward: its current tools plus
+any additional ones this new task genuinely needs. Do not drop a currently
+held tool unless it is clearly irrelevant.
+"""
+        response = llm.invoke(selection_prompt)
+        result = parse_json_safely(response.content, default=None)
+        if result is None:
+            print(f"⚠️ Tool refresh JSON parse failed for role '{role}'; keeping existing tools.")
+            return agent_conf
+
+        desired_names = set(result.get("tools", [])) | set(agent_conf["tool_names"])
+        if desired_names == set(agent_conf["tool_names"]):
+            return agent_conf
+
+        selected_tools = [
+            self.tool_registry.get_tool(name)
+            for name in desired_names
+            if self.tool_registry.get_tool(name) is not None
+        ]
+        agent_conf["llm"] = llm.bind_tools(selected_tools) if selected_tools else llm
+        agent_conf["tool_names"] = [t.name for t in selected_tools]
+        print(f"🔄 Agent '{role}' tools refreshed: {agent_conf['tool_names']}")
+        return agent_conf
 
     def create_agent(self, role: str, task_description: str) -> dict:
         print(f"🧬 Creating new agent for role: '{role}'")
@@ -264,10 +326,13 @@ Return ONLY JSON in this exact shape:
 Only select tools genuinely relevant to this role. It is fine to select zero tools.
 """
         response = llm.invoke(selection_prompt)
-        config = parse_json_safely(response.content, default={
-            "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
-            "tools": [],
-        })
+        config = parse_json_safely(response.content, default=None)
+        if config is None:
+            print(f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
+            config = {
+                "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
+                "tools": [],
+            }
 
         selected_tools = [
             self.tool_registry.get_tool(name)
