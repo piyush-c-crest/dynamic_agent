@@ -128,6 +128,14 @@ class DynamicToolRegistry:
         3. Handle errors gracefully
         4. Return JSON-serializable data
         5. Keep it focused and simple
+                
+        Example format:
+
+        @tool
+        def {tool_name}(input_data: str) -> dict:
+            Description of what the tool does.
+            code implementation here
+            
         
         Return ONLY the function code, starting with @tool and ending with the return statement.
         No imports needed (they're already available).
@@ -135,6 +143,8 @@ class DynamicToolRegistry:
         
         response = llm.invoke(creation_prompt)
         tool_code = response.content
+
+        print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
         
         # Extract function code
         try:
