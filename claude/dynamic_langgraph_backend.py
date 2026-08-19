@@ -30,6 +30,8 @@ os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
 
 MAX_RETRIES = 2
 MAX_TASKS = 6
+AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
+TOOLS_DIR = "tools"
 
 # -------------------
 # 1. LLM
@@ -38,7 +40,6 @@ llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
 )
-
 
 # -------------------
 # Helpers
@@ -91,6 +92,22 @@ class DynamicToolRegistry:
         self.register_tool("calculator", self._calculator_tool())
         self.register_tool("stock_price", self._stock_price_tool())
 
+    # Tool Storage just for easier debugging and inspection
+
+    def _save_tool_to_file(self, tool_name: str, tool_code: str):
+        os.makedirs(TOOLS_DIR, exist_ok=True)
+
+        file_path = os.path.join(TOOLS_DIR, f"{tool_name}.py")
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("from langchain_core.tools import tool\n")
+            f.write("import requests\n")
+            f.write("import json\n")
+            f.write("from datetime import datetime\n\n")
+            f.write(tool_code)
+
+        print(f"💾 Tool code saved to: {file_path}")
+
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
         """
         Register a tool in the registry.
@@ -106,7 +123,13 @@ class DynamicToolRegistry:
         tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
+
+        # Save only dynamically generated tools
+        if code:
+            self._save_tool_to_file(name, code)
+
         print(f"✅ Tool registered: {name}")
+
 
     def get_all_tools(self) -> list[BaseTool]:
         """Get all registered tools as a list"""
@@ -258,6 +281,34 @@ class DynamicAgentFactory:
             return self.refresh_tools(role, task_description)
         return self.create_agent(role, task_description)
 
+    def _create_missing_tools(self, specs: list[dict]) -> list[str]:
+        """
+        Auto-create tools an LLM tool-selection step flagged as missing
+        (Phase 1: closes the loop so tool creation happens as part of the
+        agent's own workflow, not only via the manual sidebar form).
+
+        Capped at AUTO_TOOL_LIMIT per call to avoid runaway generation from
+        a single planning/refresh step. Failures are logged and skipped —
+        a bad auto-generated tool must not crash the task in progress.
+        """
+        created = []
+        for spec in (specs or [])[:AUTO_TOOL_LIMIT]:
+            name = (spec or {}).get("name")
+            prompt = (spec or {}).get("prompt")
+            if not name or not prompt:
+                continue
+            if self.tool_registry.get_tool(name) is not None:
+                # Already exists (LLM re-proposed a known tool) — just use it.
+                created.append(name)
+                continue
+            try:
+                print(f"⚡ Auto-creating missing tool '{name}' from agent workflow...")
+                self.tool_registry.create_tool_from_prompt(prompt, name)
+                created.append(name)
+            except Exception as e:
+                print(f"❌ Auto tool creation failed for '{name}': {e}")
+        return created
+
     def refresh_tools(self, role: str, task_description: str) -> dict:
         """
         Re-check an existing agent's tool set against the *current* tool
@@ -281,11 +332,20 @@ It now needs to handle this task: "{task_description}"
 Available tools (name: description): {json.dumps(available_tools)}
 
 Return ONLY JSON in this exact shape:
-{{"tools": ["tool_name1", "tool_name2"]}}
+{{
+  "tools": ["tool_name1", "tool_name2"],
+  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}]
+}}
 
-List ALL tools this agent should have going forward: its current tools plus
-any additional ones this new task genuinely needs. Do not drop a currently
-held tool unless it is clearly irrelevant.
+Rules:
+- "tools": its current tools plus any additional EXISTING tools (from the
+  Available tools list) this new task genuinely needs. Do not drop a
+  currently held tool unless it is clearly irrelevant.
+- "new_tools": ONLY include an entry here if none of the available tools can
+  do something this task clearly requires (e.g. reading email, sending a
+  message, converting a file format, calling a specific API). Leave it as
+  an empty list if the available tools are sufficient.
+- Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
         response = llm.invoke(selection_prompt)
         result = parse_json_safely(response.content, default=None)
@@ -293,7 +353,13 @@ held tool unless it is clearly irrelevant.
             print(f"⚠️ Tool refresh JSON parse failed for role '{role}'; keeping existing tools.")
             return agent_conf
 
-        desired_names = set(result.get("tools", [])) | set(agent_conf["tool_names"])
+        created_tool_names = self._create_missing_tools(result.get("new_tools", []))
+
+        desired_names = (
+            set(result.get("tools", []))
+            | set(agent_conf["tool_names"])
+            | set(created_tool_names)
+        )
         if desired_names == set(agent_conf["tool_names"]):
             return agent_conf
 
@@ -306,6 +372,35 @@ held tool unless it is clearly irrelevant.
         agent_conf["tool_names"] = [t.name for t in selected_tools]
         print(f"🔄 Agent '{role}' tools refreshed: {agent_conf['tool_names']}")
         return agent_conf
+
+    def tool_directive(self, tool_names: list[str]) -> str:
+        """
+        A fixed, non-negotiable instruction appended to every agent's system
+        prompt at execution time (see DynamicAgentManager._agent_executor_node).
+
+        Left to its own devices, the LLM used here (openai/gpt-oss-120b) will
+        often respond "I can't browse the internet, please provide a URL"
+        even when a real `search` tool is bound and ready to call — the
+        dynamically generated persona prompt doesn't reliably force tool use
+        on its own. This directive is regenerated from the agent's *current*
+        tool_names each time a task runs, so it stays correct even after
+        refresh_tools() changes what an agent has access to.
+        """
+        if not tool_names:
+            return ""
+        descriptions = self.tool_registry.list_tools()
+        lines = [f'- {name}: {descriptions.get(name, "")}' for name in tool_names]
+        return (
+            "\n\nTOOL USE IS MANDATORY WHEN RELEVANT. You have real, working tools:\n"
+            + "\n".join(lines)
+            + "\n\nIf completing this task requires information you don't already "
+            "have with certainty (current events, prices, live data, computation, "
+            "etc.), you MUST call the appropriate tool above to get it. Do NOT say "
+            "you cannot browse the internet, do NOT ask the user to supply data "
+            "that one of your tools can retrieve, and do NOT answer from memory "
+            "when a tool exists to get current facts. Only ask the user a question "
+            "if none of your tools can obtain what's needed."
+        )
 
     def create_agent(self, role: str, task_description: str) -> dict:
         print(f"🧬 Creating new agent for role: '{role}'")
@@ -320,10 +415,18 @@ Available tools (name: description): {json.dumps(available_tools)}
 Return ONLY JSON in this exact shape:
 {{
   "system_prompt": "a system prompt defining this agent's persona, scope and behavior",
-  "tools": ["tool_name1", "tool_name2"]
+  "tools": ["tool_name1", "tool_name2"],
+  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}]
 }}
 
-Only select tools genuinely relevant to this role. It is fine to select zero tools.
+Rules:
+- "tools": only names that already appear in the Available tools list above.
+  Select tools genuinely relevant to this role. It is fine to select zero.
+- "new_tools": ONLY include an entry here if none of the available tools can
+  do something this role clearly needs (e.g. reading email, sending a
+  message, converting a file format, calling a specific external API).
+  Leave it as an empty list if the available tools are sufficient.
+- Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
         response = llm.invoke(selection_prompt)
         config = parse_json_safely(response.content, default=None)
@@ -332,11 +435,15 @@ Only select tools genuinely relevant to this role. It is fine to select zero too
             config = {
                 "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
                 "tools": [],
+                "new_tools": [],
             }
+
+        created_tool_names = self._create_missing_tools(config.get("new_tools", []))
+        all_tool_names = list(dict.fromkeys(config.get("tools", []) + created_tool_names))
 
         selected_tools = [
             self.tool_registry.get_tool(name)
-            for name in config.get("tools", [])
+            for name in all_tool_names
             if self.tool_registry.get_tool(name) is not None
         ]
 
@@ -444,8 +551,14 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             init_prompt = f"Task: {task['description']}"
             if context:
                 init_prompt += f"\n\nRelevant context from earlier tasks:\n{context}"
+
+            # Compose the full system prompt fresh from the agent's *current*
+            # tool_names rather than using a static stored string, so the
+            # mandatory tool-use directive always reflects whatever tools
+            # refresh_tools() has most recently attached to this agent.
+            full_system_prompt = agent["system_prompt"] + self.agent_factory.tool_directive(agent["tool_names"])
             task_messages = [
-                SystemMessage(content=agent["system_prompt"]),
+                SystemMessage(content=full_system_prompt),
                 HumanMessage(content=init_prompt),
             ]
 
