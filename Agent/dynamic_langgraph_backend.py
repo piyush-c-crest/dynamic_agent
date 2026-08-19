@@ -48,9 +48,9 @@ if not os.environ.get("LANGCHAIN_API_KEY"):
 # instead of a flat list of identically-named "ChatGroq" runs.
 
 MAX_RETRIES = 2
-MAX_TASKS = 2
+MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
-TOOLS_DIR = "tools"
+MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
 
 # -------------------
 # 1. LLM
@@ -112,22 +112,6 @@ class DynamicToolRegistry:
         self.register_tool("calculator", self._calculator_tool())
         self.register_tool("stock_price", self._stock_price_tool())
 
-    # Tool Storage just for easier debugging and inspection
-
-    def _save_tool_to_file(self, tool_name: str, tool_code: str):
-        os.makedirs(TOOLS_DIR, exist_ok=True)
-
-        file_path = os.path.join(TOOLS_DIR, f"{tool_name}.py")
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write("from langchain_core.tools import tool\n")
-            f.write("import requests\n")
-            f.write("import json\n")
-            f.write("from datetime import datetime\n\n")
-            f.write(tool_code)
-
-        print(f"💾 Tool code saved to: {file_path}")
-
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
         """
         Register a tool in the registry.
@@ -143,11 +127,6 @@ class DynamicToolRegistry:
         tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
-
-        # Save only dynamically generated tools
-        if code:
-            self._save_tool_to_file(name, code)
-
         print(f"✅ Tool registered: {name}")
 
     def get_all_tools(self) -> list[BaseTool]:
@@ -221,13 +200,13 @@ class DynamicToolRegistry:
         {prompt}
 
         Requirements:
-        1. if need api then use free apis like https://wttr.in/ for weather
         1. Use the @tool decorator from langchain_core.tools
         2. Include a clear docstring
         3. Handle errors gracefully
         4. Return JSON-serializable data
         5. Keep it focused and simple
         6. Do not use file I/O, os, subprocess, eval, exec, or import statements
+
         Example format:
 
         @tool
@@ -250,47 +229,145 @@ class DynamicToolRegistry:
         tool_code = response.content
         print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
 
+        # --- Sandboxed execution environment ---
+        # Only a minimal, safe set of builtins is exposed. This blocks the
+        # obvious escape hatches (open, os, subprocess, eval, __import__)
+        # that would otherwise be reachable from LLM-generated code.
+        safe_builtins = {
+            "len": len, "str": str, "int": int, "float": float, "bool": bool,
+            "list": list, "dict": dict, "tuple": tuple, "set": set,
+            "range": range, "enumerate": enumerate, "zip": zip,
+            "min": min, "max": max, "sum": sum, "sorted": sorted, "round": round,
+            "abs": abs, "isinstance": isinstance, "print": print,
+            "Exception": Exception, "ValueError": ValueError,
+            "TypeError": TypeError, "KeyError": KeyError, "True": True,
+            "False": False, "None": None,
+        }
+        safe_globals = {
+            "__builtins__": safe_builtins,
+            "tool": tool,
+            "requests": requests,
+            "json": json,
+            "datetime": datetime,
+            "re": re,
+        }
+
+        current_code = tool_code
+        last_error = None
+
+        # Phase 2: don't trust generated code just because exec() didn't
+        # raise. Run it once against synthetic args and confirm the result
+        # is JSON-serializable — the two failure modes the fixed prompt above
+        # asks the LLM to avoid ("handle errors gracefully", "return
+        # JSON-serializable data") but doesn't guarantee. A broken tool that
+        # only fails this way would otherwise only be discovered mid-task,
+        # inside a live user-facing run. On failure, feed the exact error
+        # back to the LLM for one repair attempt before giving up.
+        for attempt in range(MAX_TOOL_VALIDATION_RETRIES + 1):
+            cleaned_code = self._extract_code_block(current_code)
+            try:
+                local_vars = {}
+                exec(cleaned_code, safe_globals, local_vars)
+
+                created_tool = next(
+                    (v for v in local_vars.values() if isinstance(v, BaseTool)), None
+                )
+                if created_tool is None:
+                    raise ValueError("Generated code did not define a @tool-decorated function.")
+
+                ok, smoke_message = self._smoke_test_tool(created_tool)
+                if not ok:
+                    raise RuntimeError(f"Smoke test failed: {smoke_message}")
+
+                self.register_tool(tool_name, created_tool, cleaned_code)
+                print(f"✅ Tool '{tool_name}' created and passed smoke test.")
+                return created_tool
+
+            except Exception as e:
+                last_error = str(e)
+                print(f"⚠️ Tool '{tool_name}' generation attempt {attempt + 1} failed: {last_error}")
+
+                if attempt >= MAX_TOOL_VALIDATION_RETRIES:
+                    break
+
+                repair_prompt = f"""
+                    The following tool code failed with this error:
+                    {last_error}
+
+                    Original code:
+                    {cleaned_code}
+
+                    Fix the code so it runs correctly and satisfies the original requirement:
+                    {prompt}
+
+                    Same rules as before: use @tool, no file I/O/os/subprocess/eval/exec/imports,
+                    handle errors gracefully, return JSON-serializable data.
+                    Return ONLY the corrected function code, starting with @tool.
+                """
+                response = llm.invoke(
+                    repair_prompt,
+                    config={
+                        "run_name": "tool_codegen_repair_llm",
+                        "tags": ["tool_creation", "repair", tool_name],
+                        "metadata": {"tool_name": tool_name, "error": last_error},
+                    },
+                )
+                current_code = response.content
+
+        print(f"❌ Error creating tool '{tool_name}': {last_error}")
+        raise RuntimeError(
+            f"Failed to create a working tool '{tool_name}' after "
+            f"{MAX_TOOL_VALIDATION_RETRIES + 1} attempt(s). Last error: {last_error}"
+        )
+
+    @staticmethod
+    def _extract_code_block(raw: str) -> str:
+        if "```python" in raw:
+            return raw.split("```python")[1].split("```")[0]
+        elif "```" in raw:
+            return raw.split("```")[1].split("```")[0]
+        return raw
+
+    @staticmethod
+    def _generate_dummy_args(tool_obj: BaseTool) -> dict:
+        """Build plausible synthetic args from a tool's schema for smoke testing."""
+        dummy = {}
         try:
-            if "```python" in tool_code:
-                tool_code = tool_code.split("```python")[1].split("```")[0]
-            elif "```" in tool_code:
-                tool_code = tool_code.split("```")[1].split("```")[0]
+            schema_props = tool_obj.args or {}
+        except Exception:
+            schema_props = {}
+        for field_name, field_info in schema_props.items():
+            field_type = (field_info or {}).get("type", "string")
+            if field_type == "integer":
+                dummy[field_name] = 1
+            elif field_type == "number":
+                dummy[field_name] = 1.0
+            elif field_type == "boolean":
+                dummy[field_name] = True
+            elif field_type == "array":
+                dummy[field_name] = []
+            elif field_type == "object":
+                dummy[field_name] = {}
+            else:
+                dummy[field_name] = "test"
+        return dummy
 
-            # --- Sandboxed execution ---
-            # Only a minimal, safe set of builtins is exposed. This blocks the
-            # obvious escape hatches (open, os, subprocess, eval, __import__)
-            # that would otherwise be reachable from LLM-generated code.
-            safe_builtins = {
-                "len": len, "str": str, "int": int, "float": float, "bool": bool,
-                "list": list, "dict": dict, "tuple": tuple, "set": set,
-                "range": range, "enumerate": enumerate, "zip": zip,
-                "min": min, "max": max, "sum": sum, "sorted": sorted, "round": round,
-                "abs": abs, "isinstance": isinstance, "print": print,
-                "Exception": Exception, "ValueError": ValueError,
-                "TypeError": TypeError, "KeyError": KeyError, "True": True,
-                "False": False, "None": None,
-            }
-            safe_globals = {
-                "__builtins__": safe_builtins,
-                "tool": tool,
-                "requests": requests,
-                "json": json,
-                "datetime": datetime,
-                "re": re,
-            }
-            local_vars = {}
-            exec(tool_code, safe_globals, local_vars)
-
-            for var_name, var_obj in local_vars.items():
-                if isinstance(var_obj, BaseTool):
-                    self.register_tool(tool_name, var_obj, tool_code)
-                    return var_obj
-
-            raise ValueError("No tool created from prompt")
-
+    def _smoke_test_tool(self, tool_obj: BaseTool) -> tuple[bool, str]:
+        """
+        Invoke a freshly generated tool once with synthetic args to catch
+        obvious runtime errors (undefined names, wrong signature, missing
+        deps, non-JSON-serializable return) before it's ever handed to a
+        live agent. This does NOT validate correctness of the tool's logic
+        (that would need real credentials/data) — only that it runs and
+        returns something usable.
+        """
+        dummy_args = self._generate_dummy_args(tool_obj)
+        try:
+            result = tool_obj.invoke(dummy_args)
+            json.dumps(result, default=str)
+            return True, "ok"
         except Exception as e:
-            print(f"❌ Error creating tool: {str(e)}")
-            raise
+            return False, f"{type(e).__name__}: {e}"
 
 
 # -------------------
