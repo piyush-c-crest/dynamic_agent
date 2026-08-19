@@ -17,6 +17,7 @@ import json
 import re
 from datetime import datetime
 from langchain_groq import ChatGroq
+from langsmith import traceable
 
 load_dotenv()
 
@@ -28,8 +29,26 @@ os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
 # Make sure to add LANGCHAIN_API_KEY to your .env file
 
+if not os.environ.get("LANGCHAIN_API_KEY"):
+    print(
+        "⚠️ LANGCHAIN_API_KEY not set — LangSmith tracing will NOT appear in the "
+        "dashboard even though tracing is enabled. Add it to your .env file."
+    )
+
+# Every custom LLM call below is tagged/named (see `config=` on llm.invoke calls
+# and @traceable on the helper functions) so the LangSmith trace tree reads as:
+#   orchestrator_run
+#     planner ("planner_llm")
+#     agent_executor ("create_agent" / "refresh_agent_tools" -> possibly
+#         "auto_create_missing_tools" -> "create_tool_from_prompt", then
+#         "agent_exec:<role>")
+#     tools ("tool:<tool_name>")
+#     evaluator ("evaluator:<task_id>")
+#     assembler ("assembler_llm")
+# instead of a flat list of identically-named "ChatGroq" runs.
+
 MAX_RETRIES = 2
-MAX_TASKS = 6
+MAX_TASKS = 2
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 TOOLS_DIR = "tools"
 
@@ -40,6 +59,7 @@ llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
 )
+
 
 # -------------------
 # Helpers
@@ -130,7 +150,6 @@ class DynamicToolRegistry:
 
         print(f"✅ Tool registered: {name}")
 
-
     def get_all_tools(self) -> list[BaseTool]:
         """Get all registered tools as a list"""
         return list(self.tools.values())
@@ -184,11 +203,16 @@ class DynamicToolRegistry:
                 return {"error": str(e)}
         return get_stock_price
 
+    @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
         """
         Create a new tool from a natural language prompt.
         Code is executed in a restricted-builtins sandbox: no file/network-escape
         primitives (open, os, subprocess, eval, __import__, etc.) are exposed.
+
+        Wrapped in @traceable so LangSmith shows this as one named span with
+        the requested tool_name + prompt as inputs, letting you inspect
+        exactly what was asked for and what got generated without reading logs.
         """
         print(f"🔨 Creating tool '{tool_name}' from prompt...")
 
@@ -197,13 +221,13 @@ class DynamicToolRegistry:
         {prompt}
 
         Requirements:
+        1. if need api then use free apis like https://wttr.in/ for weather
         1. Use the @tool decorator from langchain_core.tools
         2. Include a clear docstring
         3. Handle errors gracefully
         4. Return JSON-serializable data
         5. Keep it focused and simple
         6. Do not use file I/O, os, subprocess, eval, exec, or import statements
-
         Example format:
 
         @tool
@@ -215,7 +239,14 @@ class DynamicToolRegistry:
         No imports needed (they're already available: requests, json, datetime, re).
         """
 
-        response = llm.invoke(creation_prompt)
+        response = llm.invoke(
+            creation_prompt,
+            config={
+                "run_name": "tool_codegen_llm",
+                "tags": ["tool_creation", tool_name],
+                "metadata": {"tool_name": tool_name},
+            },
+        )
         tool_code = response.content
         print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
 
@@ -281,6 +312,7 @@ class DynamicAgentFactory:
             return self.refresh_tools(role, task_description)
         return self.create_agent(role, task_description)
 
+    @traceable(name="auto_create_missing_tools", run_type="chain")
     def _create_missing_tools(self, specs: list[dict]) -> list[str]:
         """
         Auto-create tools an LLM tool-selection step flagged as missing
@@ -309,6 +341,7 @@ class DynamicAgentFactory:
                 print(f"❌ Auto tool creation failed for '{name}': {e}")
         return created
 
+    @traceable(name="refresh_agent_tools", run_type="chain")
     def refresh_tools(self, role: str, task_description: str) -> dict:
         """
         Re-check an existing agent's tool set against the *current* tool
@@ -347,7 +380,14 @@ Rules:
   an empty list if the available tools are sufficient.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
-        response = llm.invoke(selection_prompt)
+        response = llm.invoke(
+            selection_prompt,
+            config={
+                "run_name": "agent_tool_refresh_llm",
+                "tags": ["tool_refresh", role],
+                "metadata": {"role": role, "task_description": task_description},
+            },
+        )
         result = parse_json_safely(response.content, default=None)
         if result is None:
             print(f"⚠️ Tool refresh JSON parse failed for role '{role}'; keeping existing tools.")
@@ -402,6 +442,7 @@ Rules:
             "if none of your tools can obtain what's needed."
         )
 
+    @traceable(name="create_agent", run_type="chain")
     def create_agent(self, role: str, task_description: str) -> dict:
         print(f"🧬 Creating new agent for role: '{role}'")
         available_tools = self.tool_registry.list_tools()
@@ -428,7 +469,14 @@ Rules:
   Leave it as an empty list if the available tools are sufficient.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
-        response = llm.invoke(selection_prompt)
+        response = llm.invoke(
+            selection_prompt,
+            config={
+                "run_name": "agent_creation_llm",
+                "tags": ["agent_creation", role],
+                "metadata": {"role": role, "task_description": task_description},
+            },
+        )
         config = parse_json_safely(response.content, default=None)
         if config is None:
             print(f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
@@ -521,7 +569,14 @@ Return ONLY a JSON array, no prose, like:
 
 Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 """
-        response = llm.invoke(planning_prompt)
+        response = llm.invoke(
+            planning_prompt,
+            config={
+                "run_name": "planner_llm",
+                "tags": ["planner"],
+                "metadata": {"goal": goal},
+            },
+        )
         plan = parse_json_safely(response.content, default=None)
         if not plan or not isinstance(plan, list):
             plan = [{"id": "T1", "description": goal, "agent_role": "general"}]
@@ -563,13 +618,22 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             ]
 
         print(f"🤖 [{role}] executing task {task['id']}: {task['description']}")
-        response = agent["llm"].invoke(task_messages)
+        response = agent["llm"].invoke(
+            task_messages,
+            config={
+                "run_name": f"agent_exec:{role}",
+                "tags": ["agent_executor", role, task["id"]],
+                "metadata": {"role": role, "task_id": task["id"], "task_description": task["description"]},
+            },
+        )
         task_messages = task_messages + [response]
 
         return {"task_messages": task_messages}
 
     def _tools_node(self, state: OrchestratorState):
         """Custom tool executor operating on task_messages (not the main transcript)."""
+        idx = state["current_task_idx"]
+        task = state["task_plan"][idx] if idx < len(state["task_plan"]) else {"id": "?", "agent_role": "?"}
         last = state["task_messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
         tool_messages = []
@@ -581,7 +645,19 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 if tool_obj is None:
                     result = f"Error: tool '{tool_name}' not found"
                 else:
-                    result = tool_obj.invoke(tool_args)
+                    # config here is what makes each tool call show up in
+                    # LangSmith as its own named "tool:<name>" span with
+                    # tool_args as input and the return value as output —
+                    # this is the "what tool got used, what was its output"
+                    # visibility, without reading console logs.
+                    result = tool_obj.invoke(
+                        tool_args,
+                        config={
+                            "run_name": f"tool:{tool_name}",
+                            "tags": ["tool_call", tool_name, task["id"]],
+                            "metadata": {"task_id": task["id"], "agent_role": task.get("agent_role", "?")},
+                        },
+                    )
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
             tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
@@ -600,7 +676,14 @@ Agent output: {final_content}
 Does this output satisfactorily complete the task? Respond with ONLY JSON:
 {{"status": "PASS" or "RETRY", "reason": "short reason", "feedback": "what to fix if RETRY"}}
 """
-        eval_response = llm.invoke(eval_prompt)
+        eval_response = llm.invoke(
+            eval_prompt,
+            config={
+                "run_name": f"evaluator:{task['id']}",
+                "tags": ["evaluator", task["agent_role"], task["id"]],
+                "metadata": {"task_id": task["id"], "role": task["agent_role"]},
+            },
+        )
         verdict = parse_json_safely(
             eval_response.content,
             default={"status": "PASS", "reason": "auto-accepted (unparseable verdict)", "feedback": ""},
@@ -642,7 +725,14 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             summary_prompt += f"- {t['description']}: {results.get(t['id'], 'N/A')}\n"
         summary_prompt += "\nWrite a single, coherent final answer to the original goal, using the results above."
 
-        final = llm.invoke(summary_prompt)
+        final = llm.invoke(
+            summary_prompt,
+            config={
+                "run_name": "assembler_llm",
+                "tags": ["assembler"],
+                "metadata": {"goal": state["goal"]},
+            },
+        )
         print("📦 Final result assembled")
         return {"messages": [final]}
 
@@ -749,7 +839,12 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             if "temperature" in requirements:
                 self.set_temperature(requirements["temperature"])
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "run_name": "orchestrator_run",
+            "tags": ["orchestrator_run"],
+            "metadata": {"goal": user_input, "thread_id": thread_id},
+        }
         response = self.chatbot.invoke(
             {"messages": [HumanMessage(content=user_input)]},
             config=config,

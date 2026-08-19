@@ -5,6 +5,7 @@ from dynamic_langgraph_backend import agent_manager
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
+import os
 
 # ======================================== Utility Functions ================================
 
@@ -44,7 +45,13 @@ add_thread(st.session_state['thread_id'])
 
 # ======================================== Sidebar UI =======================================
 
-st.sidebar.title('🤖 Dynamic Multi-Agent Orchestrator')
+st.sidebar.title('Dynamic Multi-Agent Orchestrator')
+_langsmith_project = os.environ.get('LANGCHAIN_PROJECT')
+if _langsmith_project:
+    st.sidebar.caption(
+        f"🔍 Full run traces (agents/tools created, tool inputs & outputs, "
+        f"evaluator verdicts) are in LangSmith project **{_langsmith_project}**."
+    )
 
 # --- Chat Management ---
 col1, col2 = st.sidebar.columns(2)
@@ -165,7 +172,7 @@ with st.sidebar.expander('Configure Agent Behavior'):
 
 # ======================================== Main Chat UI =====================================
 
-st.title('🚀 Dynamic Multi-Agent Orchestrator')
+st.title('Dynamic Multi-Agent Orchestrator')
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -200,7 +207,12 @@ if user_input:
     if 'temperature' in reqs:
         agent_manager.set_temperature(reqs['temperature'])
 
-    config = {'configurable': {'thread_id': st.session_state['thread_id']}}
+    config = {
+        'configurable': {'thread_id': st.session_state['thread_id']},
+        'run_name': 'orchestrator_run',
+        'tags': ['orchestrator_run', 'streamlit'],
+        'metadata': {'goal': user_input, 'thread_id': st.session_state['thread_id']},
+    }
 
     with st.chat_message('assistant'):
         plan_box = st.empty()
