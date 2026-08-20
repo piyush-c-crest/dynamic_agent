@@ -127,6 +127,11 @@ class DynamicToolRegistry:
         tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
+        if code:
+            tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+            os.makedirs(tools_dir, exist_ok=True)
+            with open(os.path.join(tools_dir, f"{name}.py"), "w") as f:
+                f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
         print(f"✅ Tool registered: {name}")
 
     def get_all_tools(self) -> list[BaseTool]:
