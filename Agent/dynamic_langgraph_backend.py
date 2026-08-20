@@ -710,7 +710,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         )
         task_messages = task_messages + [response]
 
-        return {"task_messages": task_messages}
+        # Also mirror into the top-level `messages` channel (not just the
+        # per-task scratch `task_messages`) so LangGraph/LangSmith's Messages
+        # panel shows this AI turn — tool_calls included — instead of only
+        # ever seeing the evaluator's post-hoc summary and the final answer.
+        return {"task_messages": task_messages, "messages": [response]}
 
     def _tools_node(self, state: OrchestratorState):
         """Custom tool executor operating on task_messages (not the main transcript)."""
@@ -743,7 +747,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
             tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
-        return {"task_messages": state["task_messages"] + tool_messages}
+        # Mirror into `messages` too — this is the piece that was missing:
+        # the tool actually ran (see the `tool:<name>` run config above),
+        # but its ToolMessage only ever lived in `task_messages`, so it was
+        # invisible in the Messages panel even though the run itself traced fine.
+        return {"task_messages": state["task_messages"] + tool_messages, "messages": tool_messages}
 
     def _evaluator_node(self, state: OrchestratorState):
         idx = state["current_task_idx"]
@@ -779,6 +787,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             )
             return {
                 "task_messages": state["task_messages"] + [feedback_msg],
+                "messages": [feedback_msg],
                 "retry_count": retry_count + 1,
                 "last_verdict": verdict,
             }
