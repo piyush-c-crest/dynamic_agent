@@ -89,13 +89,67 @@ for thread_id in st.session_state['chat_threads'][::-1]:
 # --- Available Tools ---
 st.sidebar.header('🔧 Available Tools')
 try:
-    tools_dict = json.loads(agent_manager.get_tool_info())
-    for t_name, t_desc in tools_dict.items():
+    tools_status = json.loads(agent_manager.get_tool_status_info())
+    for t_name, info in tools_status.items():
+        status = info.get('status', 'active')
+        badge = {
+            'active': '✅', 'needs_package': '📦', 'needs_secret': '🔑',
+            'needs_manual_integration': '🛑', 'pending_approval': '⏸️',
+        }.get(status, '❓')
         with st.sidebar.container():
-            st.markdown(f"**🛠️ {t_name}**")
-            st.caption(t_desc)
+            st.markdown(f"**{badge} {t_name}**")
+            st.caption(info.get('description', ''))
+            if status == 'needs_package':
+                st.caption(f"⚠️ Needs package(s) not installed: {', '.join(info.get('missing_packages', []))}")
+            elif status == 'needs_secret':
+                st.caption(f"⚠️ Needs secret(s): {', '.join(info.get('missing_secrets', []))} — set below")
+            elif status == 'needs_manual_integration':
+                st.caption("🛑 Requires manual, hand-written integration (see console log for details).")
 except Exception:
     st.sidebar.info(agent_manager.get_tool_info())
+
+# --- Pending Tool Approvals ---
+try:
+    pending_tools = json.loads(agent_manager.get_pending_tools_info())
+except Exception:
+    pending_tools = {}
+
+if pending_tools:
+    st.sidebar.header('🧪 Pending Tool Approvals')
+    st.sidebar.caption(
+        "The system created these tools on its own while working on a task. "
+        "They won't be used by any agent until you approve them."
+    )
+    for p_name, p_info in pending_tools.items():
+        with st.sidebar.expander(f'⏸️ {p_name} needs approval', expanded=True):
+            st.caption(p_info.get('description', ''))
+            st.code(p_info.get('code', ''), language='python')
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button('✅ Continue', key=f'approve_{p_name}'):
+                    agent_manager.approve_tool(p_name)
+                    st.success(f'Tool "{p_name}" approved and activated.')
+                    st.rerun()
+            with c2:
+                if st.button('❌ Reject', key=f'reject_{p_name}'):
+                    agent_manager.reject_tool(p_name)
+                    st.warning(f'Tool "{p_name}" rejected and removed.')
+                    st.rerun()
+
+# --- Secrets Configuration ---
+missing_secrets = agent_manager.get_missing_secrets()
+if missing_secrets:
+    st.sidebar.header('🔑 Missing Secrets')
+    with st.sidebar.expander(f'{len(missing_secrets)} secret(s) needed', expanded=True):
+        for secret_name in missing_secrets:
+            val = st.text_input(secret_name, type='password', key=f'secret_{secret_name}')
+            if st.button(f'Save {secret_name}', key=f'save_secret_{secret_name}'):
+                if val:
+                    agent_manager.set_secret(secret_name, val)
+                    st.success(f'✅ {secret_name} saved — dependent tool(s) re-checked.')
+                    st.rerun()
+                else:
+                    st.warning('Enter a value first')
 
 # --- Dynamically Created Agents ---
 st.sidebar.header('🧠 Active Agents')
@@ -176,7 +230,9 @@ st.title('Dynamic Multi-Agent Orchestrator')
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric('Tools Available', len(json.loads(agent_manager.get_tool_info())))
+    _all_tools = json.loads(agent_manager.get_tool_status_info())
+    _active_tools = sum(1 for v in _all_tools.values() if v.get('status') == 'active')
+    st.metric('Tools Available', f"{_active_tools}/{len(_all_tools)}")
 with col2:
     st.metric('Agents Created', len(json.loads(agent_manager.get_agent_info())))
 with col3:

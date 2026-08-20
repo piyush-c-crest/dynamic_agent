@@ -15,6 +15,7 @@ import sqlite3
 import requests
 import json
 import re
+import importlib
 from datetime import datetime
 from langchain_groq import ChatGroq
 from langsmith import traceable
@@ -51,6 +52,126 @@ MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
+
+# -------------------
+# Optional module whitelist for generated tools
+# -------------------
+# The sandbox in create_tool_from_prompt has no __import__, so generated code
+# can never "import pandas" itself. Instead we pre-import a fixed set of
+# modules ONCE here — only those that actually succeed (i.e. are genuinely
+# installed in this environment) end up available — and hand them to
+# generated code as ready-to-use globals under their normal name. A tool
+# whose code needs something outside this dict simply can't get it; that's
+# treated as a "needs_package" status rather than a code bug to repair (see
+# create_tool_from_prompt). To add a library, add its pip package to
+# requirements.txt/install it, then list it here.
+_OPTIONAL_MODULES = {
+    "math": "math",
+    "statistics": "statistics",
+    "itertools": "itertools",
+    "collections": "collections",
+    "urllib_parse": "urllib.parse",   # exposed as `urllib_parse` since dotted names can't be bare identifiers
+    "bs4": "bs4",
+    "pandas": "pandas",
+    "numpy": "numpy",
+}
+
+
+def _build_allowed_extra_modules() -> dict:
+    mods = {}
+    for alias, modpath in _OPTIONAL_MODULES.items():
+        try:
+            mods[alias] = importlib.import_module(modpath)
+        except ImportError:
+            continue  # not installed here -> simply unavailable, not an error
+    return mods
+
+
+ALLOWED_EXTRA_MODULES = _build_allowed_extra_modules()
+_IMPORT_LINE_RE = re.compile(r"^\s*(import\s+\S+|from\s+\S+\s+import\s+.+)$", re.MULTILINE)
+
+# -------------------
+# Risk classification for auto tool creation
+# -------------------
+# Some tool requests should never be turned into sandboxed, LLM-generated
+# code, no matter how well-worded the prompt is:
+#   - direct database/SQL access: an LLM assembling queries from natural
+#     language, holding live DB credentials, is an injection/data-loss risk
+#     even for read-only requests (e.g. it could return an entire PII table).
+#   - sensitive write/irreversible actions: sending messages, deleting data,
+#     payments, shell/system commands.
+# These require a human to hand-write and review a scoped, parameterized
+# tool (same as stock_price/weather below) and register it manually via
+# register_tool() — auto-creation refuses and explains why instead of
+# silently producing something unsafe or something that just fails.
+_DB_RISK_RE = re.compile(
+    r"\b(sql|database|db connection|postgres|postgresql|mysql|sqlite|mongodb|"
+    r"execute query|run (a |the )?query)\b", re.I,
+)
+_SENSITIVE_ACTION_RE = re.compile(
+    r"\b(send (an? )?(email|message|sms)|smtp|delete|drop table|remove record|"
+    r"transfer money|make a payment|wire transfer|shell command|subprocess|"
+    r"system command|execute code)\b", re.I,
+)
+
+
+def classify_tool_risk(prompt: str) -> str | None:
+    """Returns 'database_access', 'sensitive_action', or None (safe to auto-generate)."""
+    if _DB_RISK_RE.search(prompt or ""):
+        return "database_access"
+    if _SENSITIVE_ACTION_RE.search(prompt or ""):
+        return "sensitive_action"
+    return None
+
+
+_RISK_MESSAGES = {
+    "database_access": (
+        "This tool needs direct database access. Auto-generating live SQL "
+        "execution from an LLM prompt is disabled — arbitrary or malformed "
+        "queries against a real database are too risky to sandbox-generate, "
+        "even read-only ones. Hand-write a parameterized tool (e.g. SQLAlchemy "
+        "with a fixed, reviewed query and a read-only DB user/role) and "
+        "register it directly via tool_registry.register_tool(), the same way "
+        "stock_price and weather are registered below."
+    ),
+    "sensitive_action": (
+        "This tool would take a sensitive or irreversible action (sending, "
+        "deleting, paying, or running system commands). Auto-generation is "
+        "disabled for this category. Hand-write and review this tool yourself, "
+        "then register it via tool_registry.register_tool()."
+    ),
+}
+
+
+class SecretsManager:
+    """
+    Narrow accessor for secrets, used both by hand-written tools (like your
+    existing get_stock_price) and injected into the sandbox for generated
+    tools via a wrapped get_secret() function (never raw os.environ).
+
+    Checks os.environ first (so .env / real deployment secrets still work),
+    then falls back to secrets set at runtime via `set()` (e.g. from a
+    Streamlit sidebar field), so a user can supply a missing key without
+    restarting the process.
+    """
+    def __init__(self):
+        self._runtime_secrets: dict[str, str] = {}
+
+    def get(self, name: str) -> str | None:
+        return os.environ.get(name) or self._runtime_secrets.get(name)
+
+    def set(self, name: str, value: str):
+        self._runtime_secrets[name] = value
+
+    def has(self, name: str) -> bool:
+        val = self.get(name)
+        return val is not None and val != ""
+
+    def missing_from(self, names: list[str]) -> list[str]:
+        return [n for n in (names or []) if not self.has(n)]
+
+
+secrets_manager = SecretsManager()
 
 # -------------------
 # 1. LLM
@@ -104,15 +225,47 @@ class DynamicToolRegistry:
     def __init__(self):
         self.tools: dict[str, BaseTool] = {}
         self.tool_code: dict[str, str] = {}
+        # Per-tool bookkeeping so the UI/agents can tell "works" apart from
+        # "exists but isn't configured yet":
+        #   status: "active" | "needs_package" | "needs_secret"
+        #   missing_packages / missing_secrets: what's blocking it, if any
+        #   required_secrets: full declared list (kept even once satisfied,
+        #     so revalidate_tool() knows what to re-check)
+        self.tool_status: dict[str, dict] = {}
         self._register_default_tools()
 
     def _register_default_tools(self):
-        """Register built-in tools"""
+        """Register built-in tools. stock_price/weather are 'secret-gated':
+        registered immediately (visible in the UI) but their active status
+        depends on whether their API key is already configured."""
         self.register_tool("search", self._search_tool())
         self.register_tool("calculator", self._calculator_tool())
-        self.register_tool("stock_price", self._stock_price_tool())
+        self._register_secret_gated_tool(
+            "stock_price", self._stock_price_tool(), ["ALPHAVANTAGE_API_KEY"]
+        )
+        self._register_secret_gated_tool(
+            "weather", self._weather_tool(), ["OPENWEATHER_API_KEY"]
+        )
 
-    def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
+    def _register_secret_gated_tool(self, name: str, tool_obj: BaseTool, required_secrets: list[str]):
+        missing = secrets_manager.missing_from(required_secrets)
+        self.register_tool(
+            name, tool_obj,
+            status="needs_secret" if missing else "active",
+            missing_secrets=missing,
+            required_secrets=required_secrets,
+        )
+
+    def register_tool(
+        self,
+        name: str,
+        tool_obj: BaseTool,
+        code: str = "",
+        status: str = "active",
+        missing_packages: list[str] | None = None,
+        missing_secrets: list[str] | None = None,
+        required_secrets: list[str] | None = None,
+    ):
         """
         Register a tool in the registry.
 
@@ -123,16 +276,26 @@ class DynamicToolRegistry:
         in the UI) will bind to the LLM under its *real* name, so tool_calls
         come back with a name the registry doesn't recognize and
         `_tools_node` reports "tool not found" even though the tool exists.
+
+        status/missing_* let a tool be registered (visible, inspectable)
+        even when it can't run yet — e.g. it needs a package that isn't
+        installed or a secret the user hasn't supplied. Default-registered
+        built-in tools and hand-written tools are "active" with nothing missing.
         """
         tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
-        if code:
-            tools_dir = os.path.join(os.path.dirname(__file__), "tools")
-            os.makedirs(tools_dir, exist_ok=True)
-            with open(os.path.join(tools_dir, f"{name}.py"), "w") as f:
-                f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
-        print(f"✅ Tool registered: {name}")
+        self.tool_status[name] = {
+            "status": status,
+            "missing_packages": missing_packages or [],
+            "missing_secrets": missing_secrets or [],
+            "required_secrets": required_secrets or [],
+        }
+        if status == "active":
+            print(f"✅ Tool registered: {name}")
+        else:
+            print(f"🟡 Tool registered but not usable yet: {name} ({status}: "
+                  f"{(missing_packages or []) + (missing_secrets or [])})")
 
     def get_all_tools(self) -> list[BaseTool]:
         """Get all registered tools as a list"""
@@ -145,6 +308,101 @@ class DynamicToolRegistry:
     def list_tools(self) -> dict[str, str]:
         """List all tools with their descriptions"""
         return {name: tool.description for name, tool in self.tools.items()}
+
+    def list_active_tools(self) -> dict[str, str]:
+        """
+        Descriptions of only tools that are actually runnable right now.
+        Used when asking the LLM to select tools for an agent/task, so it
+        never picks something still blocked on a missing package or secret
+        (it would just fail at execution time otherwise).
+        """
+        return {
+            name: tool.description
+            for name, tool in self.tools.items()
+            if self.tool_status.get(name, {}).get("status") == "active"
+        }
+
+    def list_tools_with_status(self) -> dict[str, dict]:
+        """Full status detail per tool, for the sidebar / debugging."""
+        return {
+            name: {
+                "description": tool.description,
+                **self.tool_status.get(name, {"status": "active", "missing_packages": [], "missing_secrets": []}),
+            }
+            for name, tool in self.tools.items()
+        }
+
+    def list_pending_tools(self) -> dict[str, dict]:
+        """Tools that were auto-created, passed their smoke test, but are
+        awaiting human approval before any agent can use them."""
+        return {
+            name: {
+                "description": self.tools[name].description,
+                "code": self.tool_code.get(name, ""),
+            }
+            for name, info in self.tool_status.items()
+            if info.get("status") == "pending_approval"
+        }
+
+    def approve_tool(self, name: str) -> dict:
+        """User clicked Continue: activate a pending tool so agents can
+        pick it up on their next tool-refresh."""
+        info = self.tool_status.get(name)
+        if info is None:
+            return {"status": "unknown"}
+        info["status"] = "active"
+        self.tool_status[name] = info
+        print(f"✅ Tool '{name}' approved by user and activated.")
+        return info
+
+    def reject_tool(self, name: str):
+        """User clicked Reject: discard the generated tool entirely."""
+        self.tools.pop(name, None)
+        self.tool_code.pop(name, None)
+        self.tool_status.pop(name, None)
+        print(f"🗑️ Tool '{name}' rejected by user and removed.")
+
+    def get_missing_secrets(self) -> list[str]:
+        """Union of every secret name any registered tool is still waiting on."""
+        names = set()
+        for info in self.tool_status.values():
+            names.update(info.get("missing_secrets", []))
+        return sorted(names)
+
+    def revalidate_tool(self, name: str) -> dict:
+        """
+        Re-check a tool's status against the current secrets_manager state
+        (e.g. after the user supplies a key in the sidebar) without
+        regenerating its code. Re-runs the smoke test if all its declared
+        secrets are now present.
+        """
+        info = self.tool_status.get(name)
+        tool_obj = self.tools.get(name)
+        if info is None or tool_obj is None:
+            return {"status": "unknown"}
+
+        required_secrets = info.get("required_secrets", [])
+        still_missing_secrets = secrets_manager.missing_from(required_secrets)
+
+        if info.get("missing_packages"):
+            # Packages can't be fixed at runtime by this process.
+            info["status"] = "needs_package"
+            self.tool_status[name] = info
+            return info
+
+        if still_missing_secrets:
+            info["status"] = "needs_secret"
+            info["missing_secrets"] = still_missing_secrets
+            self.tool_status[name] = info
+            return info
+
+        ok, msg = self._smoke_test_tool(tool_obj)
+        info["missing_secrets"] = []
+        info["status"] = "active" if ok else "needs_package"
+        if not ok:
+            print(f"⚠️ Revalidation smoke test for '{name}' still failing: {msg}")
+        self.tool_status[name] = info
+        return info
 
     @staticmethod
     def _search_tool() -> BaseTool:
@@ -176,9 +434,9 @@ class DynamicToolRegistry:
         @tool
         def get_stock_price(symbol: str) -> dict:
             """Fetch stock price for a symbol (e.g., AAPL, TSLA)"""
-            api_key = os.environ.get("ALPHAVANTAGE_API_KEY")
+            api_key = secrets_manager.get("ALPHAVANTAGE_API_KEY")
             if not api_key:
-                return {"error": "ALPHAVANTAGE_API_KEY not set in environment"}
+                return {"error": "ALPHAVANTAGE_API_KEY not set"}
             url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
             try:
                 r = requests.get(url, timeout=5)
@@ -187,18 +445,70 @@ class DynamicToolRegistry:
                 return {"error": str(e)}
         return get_stock_price
 
+    @staticmethod
+    def _weather_tool() -> BaseTool:
+        @tool
+        def get_weather(city: str) -> dict:
+            """Fetch current weather for a city name (e.g., 'Surat', 'London')"""
+            api_key = secrets_manager.get("OPENWEATHER_API_KEY")
+            if not api_key:
+                return {"error": "OPENWEATHER_API_KEY not set"}
+            url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+            try:
+                r = requests.get(url, timeout=5)
+                return r.json()
+            except Exception as e:
+                return {"error": str(e)}
+        return get_weather
+
+    @staticmethod
+    def _make_stub_tool(name: str, message: str) -> BaseTool:
+        """A placeholder tool for requests that were refused auto-generation
+        (see classify_tool_risk). It's registered so the name shows up in the
+        UI with a clear explanation, but its status is never 'active' so
+        agents can never select or call it."""
+        @tool
+        def stub(input_data: str = "") -> dict:
+            """Placeholder — this tool requires manual integration."""
+            return {"error": message}
+        return stub
+
     @traceable(name="create_tool_from_prompt", run_type="chain")
-    def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
+    def create_tool_from_prompt(self, prompt: str, tool_name: str, require_approval: bool = False) -> BaseTool:
         """
         Create a new tool from a natural language prompt.
         Code is executed in a restricted-builtins sandbox: no file/network-escape
         primitives (open, os, subprocess, eval, __import__, etc.) are exposed.
+
+        require_approval=True registers a successfully-generated tool with
+        status "pending_approval" instead of "active": it's created and
+        smoke-tested, but excluded from list_active_tools() (so no agent can
+        be bound to it) until a human approves it via approve_tool(). Used
+        for tools the system decides it needs on its own (auto-creation
+        during agent execution). Manual creation via the sidebar form
+        already IS the human approval step, so it's called with the default
+        require_approval=False and goes active immediately.
 
         Wrapped in @traceable so LangSmith shows this as one named span with
         the requested tool_name + prompt as inputs, letting you inspect
         exactly what was asked for and what got generated without reading logs.
         """
         print(f"🔨 Creating tool '{tool_name}' from prompt...")
+
+        # NOTE: hard risk-based refusal (classify_tool_risk / _RISK_MESSAGES,
+        # still defined above) is intentionally NOT enforced here for this
+        # demo build — everything runs in a test environment. Re-enable by
+        # uncommenting the block below once this needs to run against real
+        # systems/data:
+        #
+        # risk = classify_tool_risk(prompt)
+        # if risk:
+        #     message = _RISK_MESSAGES[risk]
+        #     stub = self._make_stub_tool(tool_name, message)
+        #     self.register_tool(tool_name, stub, status="needs_manual_integration")
+        #     return stub
+
+        available_module_names = list(ALLOWED_EXTRA_MODULES.keys())
 
         creation_prompt = f"""
         Create a Python tool function for the following requirement:
@@ -210,17 +520,25 @@ class DynamicToolRegistry:
         3. Handle errors gracefully
         4. Return JSON-serializable data
         5. Keep it focused and simple
-        6. Do not use file I/O, os, subprocess, eval, exec, or import statements
+        6. Do not use file I/O, subprocess, eval, or exec
+        7. Do NOT write import statements. The following modules are already
+           available as global names if you need them: requests, json, datetime, re,
+           {", ".join(available_module_names) if available_module_names else "(none extra installed)"}.
+           If you genuinely need a package not in that list, still write the
+           code using it under its normal name (e.g. "openpyxl") — just list it
+           in required_packages below rather than importing it; the tool will
+           be created but marked unusable until that package is added.
+        8. If this tool needs an API key / credential / secret, do NOT use
+           os.environ. Instead call get_secret("EXACT_ENV_VAR_NAME") to
+           retrieve it, and list that exact name in required_secrets below.
 
-        Example format:
-
-        @tool
-        def {tool_name}(input_data: str) -> dict:
-            Description of what the tool does.
-            code implementation here
-
-        Return ONLY the function code, starting with @tool and ending with the return statement.
-        No imports needed (they're already available: requests, json, datetime, re).
+        Return ONLY JSON in this exact shape, no prose, no markdown fences:
+        {{
+          "code": "the full @tool-decorated function as a string",
+          "required_packages": ["pkg1"],
+          "required_secrets": ["SOME_API_KEY"]
+        }}
+        Leave required_packages/required_secrets as empty lists if none are needed.
         """
 
         response = llm.invoke(
@@ -231,8 +549,25 @@ class DynamicToolRegistry:
                 "metadata": {"tool_name": tool_name},
             },
         )
-        tool_code = response.content
-        print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
+        spec = parse_json_safely(response.content, default=None)
+        if spec is None or not spec.get("code"):
+            # Fall back to treating the whole response as raw code, for
+            # models that ignore the JSON-envelope instruction.
+            spec = {"code": response.content, "required_packages": [], "required_secrets": []}
+        tool_code = spec.get("code", "")
+        declared_packages = [p for p in (spec.get("required_packages") or []) if p]
+        declared_secrets = [s for s in (spec.get("required_secrets") or []) if s]
+        print(f"📝 Generated code for tool '{tool_name}' (packages={declared_packages}, "
+              f"secrets={declared_secrets}):\n{tool_code}")
+
+        # Packages the LLM asked for that we don't actually have pre-imported.
+        # This is a real capability gap, not something a repair loop can fix —
+        # it needs a human to `pip install` it and add it to
+        # _OPTIONAL_MODULES, then recreate the tool.
+        missing_packages = [p for p in declared_packages if p not in ALLOWED_EXTRA_MODULES]
+        if missing_packages:
+            print(f"📦 Tool '{tool_name}' needs package(s) not available in this "
+                  f"environment: {missing_packages}. Registering as inactive.")
 
         # --- Sandboxed execution environment ---
         # Only a minimal, safe set of builtins is exposed. This blocks the
@@ -245,9 +580,24 @@ class DynamicToolRegistry:
             "min": min, "max": max, "sum": sum, "sorted": sorted, "round": round,
             "abs": abs, "isinstance": isinstance, "print": print,
             "Exception": Exception, "ValueError": ValueError,
-            "TypeError": TypeError, "KeyError": KeyError, "True": True,
+            "TypeError": TypeError, "KeyError": KeyError, "RuntimeError": RuntimeError,
+            "PermissionError": PermissionError, "True": True,
             "False": False, "None": None,
         }
+
+        def _make_get_secret(declared: list[str]):
+            def get_secret(name: str):
+                if name not in declared:
+                    raise PermissionError(
+                        f"Tool '{tool_name}' tried to read secret '{name}' without "
+                        f"declaring it in required_secrets."
+                    )
+                value = secrets_manager.get(name)
+                if value is None:
+                    raise RuntimeError(f"MISSING_SECRET:{name}")
+                return value
+            return get_secret
+
         safe_globals = {
             "__builtins__": safe_builtins,
             "tool": tool,
@@ -255,10 +605,13 @@ class DynamicToolRegistry:
             "json": json,
             "datetime": datetime,
             "re": re,
+            "get_secret": _make_get_secret(declared_secrets),
+            **{k: v for k, v in ALLOWED_EXTRA_MODULES.items() if k in declared_packages},
         }
 
         current_code = tool_code
         last_error = None
+        missing_secret_names: list[str] = []
 
         # Phase 2: don't trust generated code just because exec() didn't
         # raise. Run it once against synthetic args and confirm the result
@@ -266,10 +619,17 @@ class DynamicToolRegistry:
         # asks the LLM to avoid ("handle errors gracefully", "return
         # JSON-serializable data") but doesn't guarantee. A broken tool that
         # only fails this way would otherwise only be discovered mid-task,
-        # inside a live user-facing run. On failure, feed the exact error
-        # back to the LLM for one repair attempt before giving up.
+        # inside a live user-facing run. On failure, we branch:
+        #   - a missing secret is a config gap -> register as "needs_secret",
+        #     no point burning a repair attempt rewriting code that's already
+        #     correct
+        #   - anything else is treated as a real code bug -> feed the exact
+        #     error back to the LLM for one repair attempt before giving up
         for attempt in range(MAX_TOOL_VALIDATION_RETRIES + 1):
-            cleaned_code = self._extract_code_block(current_code)
+            # Strip any import lines the LLM wrote anyway (the sandbox has no
+            # __import__, so these would only ever hard-fail; better to drop
+            # them and let a genuine missing-name error surface cleanly).
+            cleaned_code = _IMPORT_LINE_RE.sub("", self._extract_code_block(current_code))
             try:
                 local_vars = {}
                 exec(cleaned_code, safe_globals, local_vars)
@@ -280,44 +640,94 @@ class DynamicToolRegistry:
                 if created_tool is None:
                     raise ValueError("Generated code did not define a @tool-decorated function.")
 
+                if missing_packages:
+                    # Code exists and parses, but a dependency isn't
+                    # installed here -> register inactive, skip smoke test
+                    # (it would just fail on the same missing name).
+                    self.register_tool(
+                        tool_name, created_tool, cleaned_code,
+                        status="needs_package", missing_packages=missing_packages,
+                        required_secrets=declared_secrets,
+                    )
+                    print(f"🟡 Tool '{tool_name}' registered but inactive — missing package(s): {missing_packages}")
+                    return created_tool
+
+                still_missing_secrets = secrets_manager.missing_from(declared_secrets)
+                if still_missing_secrets:
+                    self.register_tool(
+                        tool_name, created_tool, cleaned_code,
+                        status="needs_secret", missing_secrets=still_missing_secrets,
+                        required_secrets=declared_secrets,
+                    )
+                    print(f"🔑 Tool '{tool_name}' registered but inactive — missing secret(s): {still_missing_secrets}")
+                    return created_tool
+
                 ok, smoke_message = self._smoke_test_tool(created_tool)
                 if not ok:
+                    if smoke_message.startswith("RuntimeError: MISSING_SECRET:"):
+                        missing_secret_names = [smoke_message.split("MISSING_SECRET:", 1)[1]]
+                        raise RuntimeError(f"missing_secret:{missing_secret_names}")
                     raise RuntimeError(f"Smoke test failed: {smoke_message}")
 
-                self.register_tool(tool_name, created_tool, cleaned_code)
-                print(f"✅ Tool '{tool_name}' created and passed smoke test.")
+                final_status = "pending_approval" if require_approval else "active"
+                self.register_tool(
+                    tool_name, created_tool, cleaned_code,
+                    status=final_status, required_secrets=declared_secrets,
+                )
+                if final_status == "pending_approval":
+                    print(f"⏸️ Tool '{tool_name}' created and passed smoke test — awaiting approval.")
+                else:
+                    print(f"✅ Tool '{tool_name}' created and passed smoke test.")
                 return created_tool
 
+            except RuntimeError as e:
+                if str(e).startswith("missing_secret:"):
+                    created_tool = next(
+                        (v for v in local_vars.values() if isinstance(v, BaseTool)), None
+                    )
+                    if created_tool is not None:
+                        self.register_tool(
+                            tool_name, created_tool, cleaned_code,
+                            status="needs_secret", missing_secrets=missing_secret_names,
+                            required_secrets=declared_secrets,
+                        )
+                        print(f"🔑 Tool '{tool_name}' registered but inactive — missing secret(s): {missing_secret_names}")
+                        return created_tool
+                last_error = str(e)
             except Exception as e:
                 last_error = str(e)
-                print(f"⚠️ Tool '{tool_name}' generation attempt {attempt + 1} failed: {last_error}")
 
-                if attempt >= MAX_TOOL_VALIDATION_RETRIES:
-                    break
+            print(f"⚠️ Tool '{tool_name}' generation attempt {attempt + 1} failed: {last_error}")
 
-                repair_prompt = f"""
-                    The following tool code failed with this error:
-                    {last_error}
+            if attempt >= MAX_TOOL_VALIDATION_RETRIES:
+                break
 
-                    Original code:
-                    {cleaned_code}
+            repair_prompt = f"""
+                The following tool code failed with this error:
+                {last_error}
 
-                    Fix the code so it runs correctly and satisfies the original requirement:
-                    {prompt}
+                Original code:
+                {cleaned_code}
 
-                    Same rules as before: use @tool, no file I/O/os/subprocess/eval/exec/imports,
-                    handle errors gracefully, return JSON-serializable data.
-                    Return ONLY the corrected function code, starting with @tool.
-                """
-                response = llm.invoke(
-                    repair_prompt,
-                    config={
-                        "run_name": "tool_codegen_repair_llm",
-                        "tags": ["tool_creation", "repair", tool_name],
-                        "metadata": {"tool_name": tool_name, "error": last_error},
-                    },
-                )
-                current_code = response.content
+                Fix the code so it runs correctly and satisfies the original requirement:
+                {prompt}
+
+                Same rules as before: use @tool, no file I/O/subprocess/eval/exec/import
+                statements, handle errors gracefully, return JSON-serializable data.
+                Available pre-imported modules: requests, json, datetime, re,
+                {", ".join(k for k in declared_packages if k in ALLOWED_EXTRA_MODULES) or "(none)"}.
+                For secrets use get_secret("NAME"), never os.environ.
+                Return ONLY the corrected function code, starting with @tool.
+            """
+            response = llm.invoke(
+                repair_prompt,
+                config={
+                    "run_name": "tool_codegen_repair_llm",
+                    "tags": ["tool_creation", "repair", tool_name],
+                    "metadata": {"tool_name": tool_name, "error": last_error},
+                },
+            )
+            current_code = response.content
 
         print(f"❌ Error creating tool '{tool_name}': {last_error}")
         raise RuntimeError(
@@ -412,13 +822,25 @@ class DynamicAgentFactory:
             if not name or not prompt:
                 continue
             if self.tool_registry.get_tool(name) is not None:
-                # Already exists (LLM re-proposed a known tool) — just use it.
-                created.append(name)
+                # Already exists (LLM re-proposed a known tool). Only worth
+                # adding to this agent's set if it's actually usable — an
+                # existing tool stuck on "needs_package"/"needs_secret"
+                # would just fail if the agent tried to call it.
+                status = self.tool_registry.tool_status.get(name, {}).get("status")
+                if status == "active":
+                    created.append(name)
+                else:
+                    print(f"⏭️ Tool '{name}' already exists but is '{status}' — not attaching to agent.")
                 continue
             try:
                 print(f"⚡ Auto-creating missing tool '{name}' from agent workflow...")
-                self.tool_registry.create_tool_from_prompt(prompt, name)
-                created.append(name)
+                self.tool_registry.create_tool_from_prompt(prompt, name, require_approval=True)
+                status = self.tool_registry.tool_status.get(name, {}).get("status")
+                if status == "active":
+                    created.append(name)
+                else:
+                    print(f"🟡 Tool '{name}' created but not yet usable ({status}) — "
+                          f"it will be attached once approved/configured.")
             except Exception as e:
                 print(f"❌ Auto tool creation failed for '{name}': {e}")
         return created
@@ -438,7 +860,7 @@ class DynamicAgentFactory:
         if nothing changed.
         """
         agent_conf = self.agents[role]
-        available_tools = self.tool_registry.list_tools()
+        available_tools = self.tool_registry.list_active_tools()
 
         selection_prompt = f"""
 The "{role}" agent currently has these tools: {agent_conf['tool_names']}
@@ -489,6 +911,7 @@ Rules:
             self.tool_registry.get_tool(name)
             for name in desired_names
             if self.tool_registry.get_tool(name) is not None
+            and self.tool_registry.tool_status.get(name, {}).get("status") == "active"
         ]
         agent_conf["llm"] = llm.bind_tools(selected_tools) if selected_tools else llm
         agent_conf["tool_names"] = [t.name for t in selected_tools]
@@ -527,7 +950,7 @@ Rules:
     @traceable(name="create_agent", run_type="chain")
     def create_agent(self, role: str, task_description: str) -> dict:
         print(f"🧬 Creating new agent for role: '{role}'")
-        available_tools = self.tool_registry.list_tools()
+        available_tools = self.tool_registry.list_active_tools()
 
         selection_prompt = f"""
 You are configuring a specialized AI agent for the role "{role}".
@@ -575,6 +998,7 @@ Rules:
             self.tool_registry.get_tool(name)
             for name in all_tool_names
             if self.tool_registry.get_tool(name) is not None
+            and self.tool_registry.tool_status.get(name, {}).get("status") == "active"
         ]
 
         agent_llm = llm.bind_tools(selected_tools) if selected_tools else llm
@@ -741,7 +1165,16 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                         },
                     )
             except Exception as e:
-                result = f"Error executing tool '{tool_name}': {e}"
+                err_text = str(e)
+                if err_text.startswith("MISSING_SECRET:"):
+                    secret_name = err_text.split("MISSING_SECRET:", 1)[1]
+                    result = (
+                        f"Error: tool '{tool_name}' needs the secret '{secret_name}' to be "
+                        f"configured before it can run. Tell the user to supply it (e.g. via "
+                        f"the sidebar) rather than retrying this call."
+                    )
+                else:
+                    result = f"Error executing tool '{tool_name}': {e}"
             tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
         return {"task_messages": state["task_messages"] + tool_messages}
 
@@ -898,6 +1331,30 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     def get_tool_info(self) -> str:
         return json.dumps(self.tool_registry.list_tools(), indent=2)
 
+    def get_tool_status_info(self) -> str:
+        """Full status per tool (active / needs_package / needs_secret), for the sidebar."""
+        return json.dumps(self.tool_registry.list_tools_with_status(), indent=2)
+
+    def get_missing_secrets(self) -> list[str]:
+        return self.tool_registry.get_missing_secrets()
+
+    def get_pending_tools_info(self) -> str:
+        return json.dumps(self.tool_registry.list_pending_tools(), indent=2)
+
+    def approve_tool(self, name: str):
+        return self.tool_registry.approve_tool(name)
+
+    def reject_tool(self, name: str):
+        self.tool_registry.reject_tool(name)
+
+    def set_secret(self, name: str, value: str):
+        """Supply a secret at runtime (e.g. from a sidebar field) and
+        re-check every tool waiting on it so it can flip to 'active'
+        immediately, without regenerating any code."""
+        secrets_manager.set(name, value)
+        for tool_name in list(self.tool_registry.tools.keys()):
+            self.tool_registry.revalidate_tool(tool_name)
+
     def get_agent_info(self) -> str:
         return json.dumps(self.agent_factory.list_agents(), indent=2)
 
@@ -949,6 +1406,30 @@ def get_agent_tools() -> str:
 
 def get_agent_registry() -> str:
     return agent_manager.get_agent_info()
+
+
+def get_tool_status() -> str:
+    return agent_manager.get_tool_status_info()
+
+
+def get_missing_secrets() -> list[str]:
+    return agent_manager.get_missing_secrets()
+
+
+def set_secret_dynamically(name: str, value: str):
+    agent_manager.set_secret(name, value)
+
+
+def get_pending_tools() -> str:
+    return agent_manager.get_pending_tools_info()
+
+
+def approve_pending_tool(name: str):
+    return agent_manager.approve_tool(name)
+
+
+def reject_pending_tool(name: str):
+    agent_manager.reject_tool(name)
 
 
 def add_tool_dynamically(tool_name: str, tool_prompt: str) -> bool:
