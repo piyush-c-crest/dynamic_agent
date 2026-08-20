@@ -1,5 +1,3 @@
-# dynamic_langgraph_backend.py
-
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, Annotated, Any, Callable
 from langchain_core.messages import (
@@ -21,49 +19,24 @@ from langsmith import traceable
 
 load_dotenv()
 
-# -------------------
-# LangSmith Setup
-# -------------------
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
-# Make sure to add LANGCHAIN_API_KEY to your .env file
+# Requires LANGCHAIN_API_KEY in .env
 
 if not os.environ.get("LANGCHAIN_API_KEY"):
-    print(
-        "⚠️ LANGCHAIN_API_KEY not set — LangSmith tracing will NOT appear in the "
-        "dashboard even though tracing is enabled. Add it to your .env file."
-    )
-
-# Every custom LLM call below is tagged/named (see `config=` on llm.invoke calls
-# and @traceable on the helper functions) so the LangSmith trace tree reads as:
-#   orchestrator_run
-#     planner ("planner_llm")
-#     agent_executor ("create_agent" / "refresh_agent_tools" -> possibly
-#         "auto_create_missing_tools" -> "create_tool_from_prompt", then
-#         "agent_exec:<role>")
-#     tools ("tool:<tool_name>")
-#     evaluator ("evaluator:<task_id>")
-#     assembler ("assembler_llm")
-# instead of a flat list of identically-named "ChatGroq" runs.
+    print("⚠️ LANGCHAIN_API_KEY not set — LangSmith tracing will not appear in the dashboard.")
 
 MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
 
-# -------------------
-# 1. LLM
-# -------------------
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
 )
 
-
-# -------------------
-# Helpers
-# -------------------
 def parse_json_safely(text: str, default=None):
     """Extract and parse JSON from an LLM response, tolerating markdown fences."""
     if text is None:
@@ -78,10 +51,6 @@ def parse_json_safely(text: str, default=None):
     except Exception:
         return default
 
-
-# -------------------
-# Orchestrator State
-# -------------------
 class OrchestratorState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     goal: str
@@ -92,15 +61,8 @@ class OrchestratorState(TypedDict):
     retry_count: int
     last_verdict: dict
 
-
-# -------------------
-# 2. Dynamic Tool Registry
-# -------------------
 class DynamicToolRegistry:
-    """
-    Manages dynamic tool creation and registration.
-    Tools can be created from natural language prompts.
-    """
+    """Manages dynamic tool creation and registration."""
     def __init__(self):
         self.tools: dict[str, BaseTool] = {}
         self.tool_code: dict[str, str] = {}
@@ -234,10 +196,6 @@ class DynamicToolRegistry:
         tool_code = response.content
         print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
 
-        # --- Sandboxed execution environment ---
-        # Only a minimal, safe set of builtins is exposed. This blocks the
-        # obvious escape hatches (open, os, subprocess, eval, __import__)
-        # that would otherwise be reachable from LLM-generated code.
         safe_builtins = {
             "len": len, "str": str, "int": int, "float": float, "bool": bool,
             "list": list, "dict": dict, "tuple": tuple, "set": set,
@@ -260,14 +218,6 @@ class DynamicToolRegistry:
         current_code = tool_code
         last_error = None
 
-        # Phase 2: don't trust generated code just because exec() didn't
-        # raise. Run it once against synthetic args and confirm the result
-        # is JSON-serializable — the two failure modes the fixed prompt above
-        # asks the LLM to avoid ("handle errors gracefully", "return
-        # JSON-serializable data") but doesn't guarantee. A broken tool that
-        # only fails this way would otherwise only be discovered mid-task,
-        # inside a live user-facing run. On failure, feed the exact error
-        # back to the LLM for one repair attempt before giving up.
         for attempt in range(MAX_TOOL_VALIDATION_RETRIES + 1):
             cleaned_code = self._extract_code_block(current_code)
             try:
@@ -375,9 +325,6 @@ class DynamicToolRegistry:
             return False, f"{type(e).__name__}: {e}"
 
 
-# -------------------
-# 3. Dynamic Agent Factory
-# -------------------
 class DynamicAgentFactory:
     """
     Creates and caches specialized sub-agents at runtime.
