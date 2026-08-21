@@ -15,6 +15,7 @@ import requests
 import json
 import re
 import base64
+import operator
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
@@ -105,6 +106,19 @@ class OrchestratorState(TypedDict):
     task_messages: list[BaseMessage]
     retry_count: int
     last_verdict: dict
+    conversation_history: Annotated[list[dict], operator.add]
+
+
+MAX_HISTORY_TURNS_IN_PROMPT = 12  # cap how many past turns we inject into prompts
+
+
+def _format_conversation_history(history: list[dict], max_turns: int = MAX_HISTORY_TURNS_IN_PROMPT) -> str:
+    """Render prior conversation turns as plain text for inclusion in an LLM prompt."""
+    if not history:
+        return ""
+    recent = history[-max_turns:]
+    lines = [f"{turn.get('role', 'user').capitalize()}: {turn.get('content', '')}" for turn in recent]
+    return "\n".join(lines)
 
 
 class DynamicToolRegistry:
@@ -569,6 +583,13 @@ class DynamicAgentManager:
         goal = state["messages"][-1].content
         print(f"🧭 Planning for goal: {goal}")
 
+        prior_history = state.get("conversation_history", []) or []
+        history_text = _format_conversation_history(prior_history)
+        history_note = (
+            f"\n\nConversation so far (most recent {min(len(prior_history), MAX_HISTORY_TURNS_IN_PROMPT)} turns):\n{history_text}"
+            if history_text else ""
+        )
+
         style_note = f"\nDesired response style: {self.behavior_style}." if self.behavior_style else ""
         extra_note = f"\nAdditional instruction: {self.extra_instruction}" if self.extra_instruction else ""
 
@@ -578,6 +599,12 @@ Break the goal below into a short sequence of atomic, actionable tasks.
 For each task, assign an "agent_role": a short label for the kind of
 specialist needed (e.g. "researcher", "calculator", "analyst", "writer").
 Reuse the same role across tasks when it genuinely fits the same specialty.
+
+If the conversation history below already contains the information needed to
+answer the goal plan a
+single task that answers directly from that history — do NOT plan tasks that
+invent a way to "store" or "look up" data; you already have the transcript.
+{history_note}
 
 Goal: "{goal}"{style_note}{extra_note}
 
@@ -612,6 +639,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             "task_messages": [],
             "retry_count": 0,
             "last_verdict": {},
+            "conversation_history": [{"role": "user", "content": goal}],
         }
 
     def _agent_executor_node(self, state: OrchestratorState):
@@ -623,7 +651,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         task_messages = state.get("task_messages") or []
         if not task_messages:
             context = self._build_context(state.get("task_results", {}), task)
+            history_text = _format_conversation_history(state.get("conversation_history", []) or [])
+
             init_prompt = f"Task: {task['description']}"
+            if history_text:
+                init_prompt += f"\n\nFull conversation so far (use this as ground truth for anything the user has already said, e.g. their name or prior requests):\n{history_text}"
             if context:
                 init_prompt += f"\n\nRelevant context from earlier tasks:\n{context}"
 
@@ -749,7 +781,10 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             },
         )
         print("📦 Final result assembled")
-        return {"messages": [final]}
+        return {
+            "messages": [final],
+            "conversation_history": [{"role": "assistant", "content": final.content}],
+        }
 
     # ---------- routing ----------
     @staticmethod
