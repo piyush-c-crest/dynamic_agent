@@ -14,7 +14,7 @@ import requests
 import json
 import re
 from datetime import datetime
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langsmith import traceable
 
 load_dotenv()
@@ -32,11 +32,9 @@ MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
 
-llm = ChatGroq(
-    model="openai/gpt-oss-120b",
-    temperature=0,
+llm = ChatOpenAI(
+    model="openai.gpt-oss-120b"
 )
-
 
 def parse_json_safely(text: str, default=None):
     """Extract and parse JSON from an LLM response, tolerating markdown fences."""

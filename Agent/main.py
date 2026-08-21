@@ -1,7 +1,3 @@
-# main.py
-# FastAPI layer over the existing, unmodified dynamic_langgraph_backend.py
-# Replaces dynamic_streamlit_frontend.py. No backend/graph/workflow logic touched.
-
 import json
 import uuid
 
@@ -16,8 +12,6 @@ from dynamic_langgraph_backend import agent_manager
 
 app = FastAPI(title="Dynamic Multi-Agent Orchestrator API")
 
-# Wide-open CORS for local dev / any frontend hitting this API.
-# Tighten allow_origins for production.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,7 +20,6 @@ app.add_middleware(
 )
 
 
-# ---------- request/response models ----------
 class ChatRequest(BaseModel):
     goal: str
     thread_id: str | None = None
@@ -36,7 +29,6 @@ class ThreadResponse(BaseModel):
     thread_id: str
 
 
-# ---------- basic endpoints ----------
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -58,7 +50,6 @@ def list_agents():
     return json.loads(agent_manager.get_agent_info())
 
 
-# ---------- thread history (for a "recents" sidebar) ----------
 @app.get("/threads")
 def list_threads():
     """All threads that have at least one saved message, most recently updated first."""
@@ -71,7 +62,6 @@ def thread_messages(thread_id: str):
     return {"thread_id": thread_id, "messages": agent_manager.get_thread_history(thread_id)}
 
 
-# ---------- non-streaming chat ----------
 @app.post("/chat")
 def chat(req: ChatRequest):
     """Run the full graph and return only the final assembled answer."""
@@ -82,7 +72,6 @@ def chat(req: ChatRequest):
     return {"thread_id": thread_id, "answer": final_answer}
 
 
-# ---------- streaming chat (SSE) ----------
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -98,8 +87,6 @@ def _stream_events(goal: str, thread_id: str):
     yield _sse("thread", {"thread_id": thread_id})
 
     final_answer = ""
-    # Same stream_mode="updates" loop the Streamlit UI used — only the
-    # transport (SSE instead of st.empty() boxes) has changed.
     for update in agent_manager.chatbot.stream(
         {"messages": [HumanMessage(content=goal)]},
         config=config,
@@ -138,5 +125,4 @@ def chat_stream(goal: str, thread_id: str | None = None):
     )
 
 
-# ---------- optional minimal test UI ----------
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
