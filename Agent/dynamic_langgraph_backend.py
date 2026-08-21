@@ -16,6 +16,7 @@ import json
 import re
 import base64
 import operator
+import contextvars
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
@@ -95,6 +96,37 @@ def parse_json_safely(text: str, default=None):
         return json.loads(cleaned.strip())
     except Exception:
         return default
+
+_token_usage_ctx: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "token_usage_ctx", default=None
+)
+
+
+def _extract_usage(response) -> dict:
+    """Pull input/output/total token counts off an LLM response in a provider-agnostic way."""
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+
+    # Fallback: raw OpenAI-style token_usage dict inside response_metadata
+    meta = getattr(response, "response_metadata", {}) or {}
+    token_usage = meta.get("token_usage") or {}
+    input_tokens = token_usage.get("prompt_tokens", 0)
+    output_tokens = token_usage.get("completion_tokens", 0)
+    total_tokens = token_usage.get("total_tokens", input_tokens + output_tokens)
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+
+
+def _record_token_usage(node: str, response, tags: list[str] | None = None):
+    """Record one LLM call's token usage against the currently-running `run()` call, if tracking is active."""
+    bucket = _token_usage_ctx.get()
+    if bucket is None:
+        return  # no active run() context (e.g. called outside DynamicAgentManager.run)
+    usage = _extract_usage(response)
+    bucket.append({"node": node, "tags": tags or [], **usage})
 
 
 class OrchestratorState(TypedDict):
@@ -242,6 +274,7 @@ class DynamicToolRegistry:
                 "metadata": {"tool_name": tool_name},
             },
         )
+        _record_token_usage(f"tool_codegen:{tool_name}", response, ["tool_creation"])
         tool_code = response.content
         print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
 
@@ -318,6 +351,7 @@ class DynamicToolRegistry:
                         "metadata": {"tool_name": tool_name, "error": last_error},
                     },
                 )
+                _record_token_usage(f"tool_codegen_repair:{tool_name}", response, ["tool_creation", "repair"])
                 current_code = response.content
 
         print(f"❌ Error creating tool '{tool_name}': {last_error}")
@@ -436,6 +470,7 @@ Rules:
                 "metadata": {"role": role, "task_description": task_description},
             },
         )
+        _record_token_usage(f"tool_refresh:{role}", response, ["tool_refresh"])
         result = parse_json_safely(response.content, default=None)
         if result is None:
             print(f"⚠️ Tool refresh JSON parse failed for role '{role}'; keeping existing tools.")
@@ -514,6 +549,7 @@ Rules:
                 "metadata": {"role": role, "task_description": task_description},
             },
         )
+        _record_token_usage(f"agent_creation:{role}", response, ["agent_creation"])
         config = parse_json_safely(response.content, default=None)
         if config is None:
             print(f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
@@ -624,6 +660,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 "metadata": {"goal": goal},
             },
         )
+        _record_token_usage("planner", response, ["planner"])
         plan = parse_json_safely(response.content, default=None)
         if not plan or not isinstance(plan, list):
             plan = [{"id": "T1", "description": goal, "agent_role": "general"}]
@@ -675,6 +712,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 "metadata": {"role": role, "task_id": task["id"], "task_description": task["description"]},
             },
         )
+        _record_token_usage(f"agent_executor:{role}:{task['id']}", response, ["agent_executor", role])
         task_messages = task_messages + [response]
 
         # Mirror into top-level `messages` so LangSmith's Messages panel shows this turn
@@ -730,6 +768,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
                 "metadata": {"task_id": task["id"], "role": task["agent_role"]},
             },
         )
+        _record_token_usage(f"evaluator:{task['id']}", eval_response, ["evaluator", task["agent_role"]])
         verdict = parse_json_safely(
             eval_response.content,
             default={"status": "PASS", "reason": "auto-accepted (unparseable verdict)", "feedback": ""},
@@ -780,6 +819,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
                 "metadata": {"goal": state["goal"]},
             },
         )
+        _record_token_usage("assembler", final, ["assembler"])
         print("📦 Final result assembled")
         return {
             "messages": [final],
@@ -921,11 +961,67 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             "tags": ["orchestrator_run"],
             "metadata": {"goal": user_input, "thread_id": thread_id},
         }
-        response = self.chatbot.invoke(
-            {"messages": [HumanMessage(content=user_input)]},
-            config=config,
-        )
+
+        usage_records: list = []
+        ctx_token = _token_usage_ctx.set(usage_records)
+        try:
+            response = self.chatbot.invoke(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=config,
+            )
+        finally:
+            _token_usage_ctx.reset(ctx_token)
+
+        token_usage = self._summarize_token_usage(usage_records)
+        self._print_token_usage(user_input, token_usage)
+        response["token_usage"] = token_usage
         return response
+
+    # ---------- token usage helpers ----------
+    @staticmethod
+    def _summarize_token_usage(records: list[dict]) -> dict:
+        """Turn the raw list of per-LLM-call token records collected during one run() into a
+        step-by-step breakdown plus totals, e.g.:
+        {
+          "calls": [
+            {"step": 1, "node": "planner", "tags": [...], "input_tokens": 320, "output_tokens": 85, "total_tokens": 405},
+            ...
+          ],
+          "totals": {"input_tokens": ..., "output_tokens": ..., "total_tokens": ..., "llm_calls": N}
+        }
+        """
+        calls = []
+        totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for i, r in enumerate(records, start=1):
+            calls.append({
+                "step": i,
+                "node": r["node"],
+                "tags": r.get("tags", []),
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
+                "total_tokens": r["total_tokens"],
+            })
+            totals["input_tokens"] += r["input_tokens"]
+            totals["output_tokens"] += r["output_tokens"]
+            totals["total_tokens"] += r["total_tokens"]
+        totals["llm_calls"] = len(records)
+        return {"calls": calls, "totals": totals}
+
+    @staticmethod
+    def _print_token_usage(user_input: str, token_usage: dict):
+        totals = token_usage["totals"]
+        print(f"\n🔢 Token usage for prompt: {user_input[:80]!r}")
+        for c in token_usage["calls"]:
+            print(
+                f"   [{c['step']}] {c['node']:<32} "
+                f"in={c['input_tokens']:<6} out={c['output_tokens']:<6} total={c['total_tokens']}"
+            )
+        print(
+            f"   {'TOTAL (' + str(totals['llm_calls']) + ' calls)':<36} "
+            f"in={totals['input_tokens']:<6} out={totals['output_tokens']:<6} total={totals['total_tokens']}\n"
+        )
+
+
 
 
 agent_manager = DynamicAgentManager()
