@@ -13,6 +13,7 @@ import sqlite3
 import requests
 import json
 import re
+import base64
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
@@ -81,10 +82,16 @@ class DynamicToolRegistry:
         self.tools[name] = tool_obj
         self.tool_code[name] = code
         if code:
-            tools_dir = os.path.join(os.path.dirname(__file__), "tools")
-            os.makedirs(tools_dir, exist_ok=True)
-            with open(os.path.join(tools_dir, f"{name}.py"), "w") as f:
-                f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
+            try:
+                tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+                os.makedirs(tools_dir, exist_ok=True)
+                with open(os.path.join(tools_dir, f"{name}.py"), "w", encoding="utf-8") as f:
+                    f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
+            except OSError as e:
+                # Persisting the source to disk is a nice-to-have for debugging/audit, not a
+                # correctness requirement. The tool has already passed exec + smoke test at this
+                # point, so a disk/encoding hiccup here must never invalidate a working tool.
+                print(f"⚠️ Could not persist source for tool '{name}' to disk: {e}")
         print(f"✅ Tool registered: {name}")
 
     def get_all_tools(self) -> list[BaseTool]:
@@ -165,7 +172,11 @@ class DynamicToolRegistry:
             code implementation here
 
         Return ONLY the function code, starting with @tool and ending with the return statement.
-        No imports needed (they're already available: requests, json, datetime, re).
+        No imports needed (they're already available: requests, json, datetime, re, base64).
+        If the task requires returning file/image bytes to the caller (e.g. delivering a
+        generated file), fetch or produce the bytes and return them base64-encoded
+        (e.g. base64.b64encode(data).decode("utf-8")) as a JSON-serializable string field,
+        rather than only returning an external URL.
         """
 
         response = llm.invoke(
@@ -196,6 +207,7 @@ class DynamicToolRegistry:
             "json": json,
             "datetime": datetime,
             "re": re,
+            "base64": base64,
         }
 
         current_code = tool_code
@@ -240,6 +252,7 @@ class DynamicToolRegistry:
 
                     Same rules as before: use @tool, no file I/O/os/subprocess/eval/exec/imports,
                     handle errors gracefully, return JSON-serializable data.
+                    Available modules (no import needed): requests, json, datetime, re, base64.
                     Return ONLY the corrected function code, starting with @tool.
                 """
                 response = llm.invoke(
