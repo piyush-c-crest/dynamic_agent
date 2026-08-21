@@ -9,6 +9,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool, Tool, BaseTool
 from dotenv import load_dotenv
 import os
+import sys
 import sqlite3
 import requests
 import json
@@ -19,6 +20,49 @@ from langchain_openai import ChatOpenAI
 from langsmith import traceable
 
 load_dotenv()
+
+# ---------- terminal output -> file logging ----------
+class _Tee:
+    """Mirrors every write to both the original stream and a log file.
+
+    Wrapping sys.stdout/sys.stderr this way captures ALL console output —
+    including every existing print() call throughout this module — without
+    needing to touch each call site individually.
+    """
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+                s.flush()
+            except Exception:
+                pass  # never let a logging failure break the app
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return any(getattr(s, "isatty", lambda: False)() for s in self.streams)
+
+
+def _setup_console_logging(log_dir: str = "logs") -> str:
+    """Redirect stdout/stderr so everything printed to the terminal is also written to a file."""
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_file = open(log_path, "a", encoding="utf-8")  # utf-8 to safely hold any generated content
+    sys.stdout = _Tee(sys.stdout, log_file)
+    sys.stderr = _Tee(sys.stderr, log_file)
+    return log_path
+
+
+LOG_FILE_PATH = _setup_console_logging()
+print(f"🗒️ Logging console output to: {LOG_FILE_PATH}")
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
@@ -88,9 +132,6 @@ class DynamicToolRegistry:
                 with open(os.path.join(tools_dir, f"{name}.py"), "w", encoding="utf-8") as f:
                     f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
             except OSError as e:
-                # Persisting the source to disk is a nice-to-have for debugging/audit, not a
-                # correctness requirement. The tool has already passed exec + smoke test at this
-                # point, so a disk/encoding hiccup here must never invalidate a working tool.
                 print(f"⚠️ Could not persist source for tool '{name}' to disk: {e}")
         print(f"✅ Tool registered: {name}")
 
