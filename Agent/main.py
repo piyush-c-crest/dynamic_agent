@@ -58,6 +58,19 @@ def list_agents():
     return json.loads(agent_manager.get_agent_info())
 
 
+# ---------- thread history (for a "recents" sidebar) ----------
+@app.get("/threads")
+def list_threads():
+    """All threads that have at least one saved message, most recently updated first."""
+    return {"threads": agent_manager.list_threads()}
+
+
+@app.get("/thread/{thread_id}/messages")
+def thread_messages(thread_id: str):
+    """Full saved message history for one thread, e.g. to load when a recent chat is clicked."""
+    return {"thread_id": thread_id, "messages": agent_manager.get_thread_history(thread_id)}
+
+
 # ---------- non-streaming chat ----------
 @app.post("/chat")
 def chat(req: ChatRequest):

@@ -747,7 +747,9 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         )
         graph.add_edge("assembler", END)
 
-        conn = sqlite3.connect(database="DB/dynamic_chatbot.db", check_same_thread=False)
+        db_path = "DB/dynamic_chatbot.db"
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(database=db_path, check_same_thread=False)
         checkpointer = SqliteSaver(conn=conn)
 
         return graph.compile(checkpointer=checkpointer)
@@ -777,6 +779,34 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
 
     def get_agent_info(self) -> str:
         return json.dumps(self.agent_factory.list_agents(), indent=2)
+
+    def list_threads(self, limit: int = 50) -> list[dict]:
+        """List known thread_ids with a title (first user message) and last-updated time, most recent first."""
+        latest_by_thread: dict[str, dict] = {}
+        for cp_tuple in self.chatbot.checkpointer.list(None):
+            thread_id = cp_tuple.config["configurable"]["thread_id"]
+            ts = cp_tuple.checkpoint.get("ts", "")
+            if thread_id in latest_by_thread and latest_by_thread[thread_id]["updated_at"] >= ts:
+                continue
+            messages = cp_tuple.checkpoint.get("channel_values", {}).get("messages", [])
+            title = ""
+            for m in messages:
+                if getattr(m, "type", "") == "human" and getattr(m, "content", ""):
+                    title = m.content
+                    break
+            latest_by_thread[thread_id] = {
+                "thread_id": thread_id,
+                "title": (title[:60] + "…") if len(title) > 60 else title,
+                "updated_at": ts,
+            }
+        threads = sorted(latest_by_thread.values(), key=lambda t: t["updated_at"], reverse=True)
+        return threads[:limit]
+
+    def get_thread_history(self, thread_id: str) -> list[dict]:
+        """Return a thread's full message history as plain role/content dicts."""
+        state = self.chatbot.get_state({"configurable": {"thread_id": thread_id}})
+        messages = state.values.get("messages", []) if state and state.values else []
+        return [{"role": getattr(m, "type", "unknown"), "content": getattr(m, "content", "")} for m in messages]
 
     def run(self, user_input: str, thread_id: str, requirements: dict = None):
         """
