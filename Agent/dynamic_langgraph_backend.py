@@ -37,6 +37,7 @@ llm = ChatGroq(
     temperature=0,
 )
 
+
 def parse_json_safely(text: str, default=None):
     """Extract and parse JSON from an LLM response, tolerating markdown fences."""
     if text is None:
@@ -51,6 +52,7 @@ def parse_json_safely(text: str, default=None):
     except Exception:
         return default
 
+
 class OrchestratorState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     goal: str
@@ -60,6 +62,7 @@ class OrchestratorState(TypedDict):
     task_messages: list[BaseMessage]
     retry_count: int
     last_verdict: dict
+
 
 class DynamicToolRegistry:
     """Manages dynamic tool creation and registration."""
@@ -75,17 +78,7 @@ class DynamicToolRegistry:
         self.register_tool("stock_price", self._stock_price_tool())
 
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
-        """
-        Register a tool in the registry.
-
-        Forces tool_obj.name to match the registry key. Without this, a tool
-        whose underlying function is named differently from its registry key
-        (e.g. get_stock_price registered under "stock_price", or any
-        LLM-generated tool whose function name differs from the name typed
-        in the UI) will bind to the LLM under its *real* name, so tool_calls
-        come back with a name the registry doesn't recognize and
-        `_tools_node` reports "tool not found" even though the tool exists.
-        """
+        """Register a tool, forcing tool_obj.name to match the registry key."""
         tool_obj.name = name
         self.tools[name] = tool_obj
         self.tool_code[name] = code
@@ -151,15 +144,7 @@ class DynamicToolRegistry:
 
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
-        """
-        Create a new tool from a natural language prompt.
-        Code is executed in a restricted-builtins sandbox: no file/network-escape
-        primitives (open, os, subprocess, eval, __import__, etc.) are exposed.
-
-        Wrapped in @traceable so LangSmith shows this as one named span with
-        the requested tool_name + prompt as inputs, letting you inspect
-        exactly what was asked for and what got generated without reading logs.
-        """
+        """Create a new tool from a natural language prompt, run in a restricted-builtins sandbox."""
         print(f"🔨 Creating tool '{tool_name}' from prompt...")
 
         creation_prompt = f"""
@@ -308,14 +293,7 @@ class DynamicToolRegistry:
         return dummy
 
     def _smoke_test_tool(self, tool_obj: BaseTool) -> tuple[bool, str]:
-        """
-        Invoke a freshly generated tool once with synthetic args to catch
-        obvious runtime errors (undefined names, wrong signature, missing
-        deps, non-JSON-serializable return) before it's ever handed to a
-        live agent. This does NOT validate correctness of the tool's logic
-        (that would need real credentials/data) — only that it runs and
-        returns something usable.
-        """
+        """Invoke a freshly generated tool with synthetic args to catch obvious runtime errors."""
         dummy_args = self._generate_dummy_args(tool_obj)
         try:
             result = tool_obj.invoke(dummy_args)
@@ -326,12 +304,7 @@ class DynamicToolRegistry:
 
 
 class DynamicAgentFactory:
-    """
-    Creates and caches specialized sub-agents at runtime.
-    Each agent is a distinct (system_prompt, tool_subset, llm) triple built for
-    a specific role the planner identified — this is what makes agent creation
-    dynamic rather than just tool creation on a single fixed agent.
-    """
+    """Creates and caches specialized sub-agents (system_prompt, tools, llm) at runtime."""
     def __init__(self, tool_registry: DynamicToolRegistry):
         self.tool_registry = tool_registry
         self.agents: dict[str, dict] = {}
@@ -343,15 +316,7 @@ class DynamicAgentFactory:
 
     @traceable(name="auto_create_missing_tools", run_type="chain")
     def _create_missing_tools(self, specs: list[dict]) -> list[str]:
-        """
-        Auto-create tools an LLM tool-selection step flagged as missing
-        (Phase 1: closes the loop so tool creation happens as part of the
-        agent's own workflow, not only via the manual sidebar form).
-
-        Capped at AUTO_TOOL_LIMIT per call to avoid runaway generation from
-        a single planning/refresh step. Failures are logged and skipped —
-        a bad auto-generated tool must not crash the task in progress.
-        """
+        """Auto-create tools an LLM tool-selection step flagged as missing, capped at AUTO_TOOL_LIMIT."""
         created = []
         for spec in (specs or [])[:AUTO_TOOL_LIMIT]:
             name = (spec or {}).get("name")
@@ -359,7 +324,6 @@ class DynamicAgentFactory:
             if not name or not prompt:
                 continue
             if self.tool_registry.get_tool(name) is not None:
-                # Already exists (LLM re-proposed a known tool) — just use it.
                 created.append(name)
                 continue
             try:
@@ -372,18 +336,7 @@ class DynamicAgentFactory:
 
     @traceable(name="refresh_agent_tools", run_type="chain")
     def refresh_tools(self, role: str, task_description: str) -> dict:
-        """
-        Re-check an existing agent's tool set against the *current* tool
-        registry and the *current* task.
-
-        Without this, an agent's tools are decided once from whatever the
-        first task it ever handled needed, and never revisited — so (a) a
-        role reused later for a task needing a different tool stays stuck
-        without it, and (b) a tool added from the sidebar after the role
-        already exists is invisible to it forever. This only ever expands
-        the tool set (never removes tools), and skips the rebind entirely
-        if nothing changed.
-        """
+        """Re-check an existing agent's tool set against the current registry and task. Only expands tools, never removes."""
         agent_conf = self.agents[role]
         available_tools = self.tool_registry.list_tools()
 
@@ -443,18 +396,7 @@ Rules:
         return agent_conf
 
     def tool_directive(self, tool_names: list[str]) -> str:
-        """
-        A fixed, non-negotiable instruction appended to every agent's system
-        prompt at execution time (see DynamicAgentManager._agent_executor_node).
-
-        Left to its own devices, the LLM used here (openai/gpt-oss-120b) will
-        often respond "I can't browse the internet, please provide a URL"
-        even when a real `search` tool is bound and ready to call — the
-        dynamically generated persona prompt doesn't reliably force tool use
-        on its own. This directive is regenerated from the agent's *current*
-        tool_names each time a task runs, so it stays correct even after
-        refresh_tools() changes what an agent has access to.
-        """
+        """Fixed instruction appended to every agent's system prompt to force tool use when relevant."""
         if not tool_names:
             return ""
         descriptions = self.tool_registry.list_tools()
@@ -543,12 +485,9 @@ Rules:
         }
 
 
-# -------------------
-# 4. Dynamic Agent Manager (Orchestrator)
-# -------------------
 class DynamicAgentManager:
     """
-    Owns the full orchestration graph:
+    Orchestration graph:
     planner -> agent_executor <-> tools -> evaluator -> (retry | next task) -> assembler
     """
     def __init__(self):
@@ -636,10 +575,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             if context:
                 init_prompt += f"\n\nRelevant context from earlier tasks:\n{context}"
 
-            # Compose the full system prompt fresh from the agent's *current*
-            # tool_names rather than using a static stored string, so the
-            # mandatory tool-use directive always reflects whatever tools
-            # refresh_tools() has most recently attached to this agent.
+            # Regenerate the tool directive fresh so it reflects the agent's current tools
             full_system_prompt = agent["system_prompt"] + self.agent_factory.tool_directive(agent["tool_names"])
             task_messages = [
                 SystemMessage(content=full_system_prompt),
@@ -657,14 +593,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         )
         task_messages = task_messages + [response]
 
-        # Also mirror into the top-level `messages` channel (not just the
-        # per-task scratch `task_messages`) so LangGraph/LangSmith's Messages
-        # panel shows this AI turn — tool_calls included — instead of only
-        # ever seeing the evaluator's post-hoc summary and the final answer.
+        # Mirror into top-level `messages` so LangSmith's Messages panel shows this turn
         return {"task_messages": task_messages, "messages": [response]}
 
     def _tools_node(self, state: OrchestratorState):
-        """Custom tool executor operating on task_messages (not the main transcript)."""
+        """Custom tool executor operating on task_messages."""
         idx = state["current_task_idx"]
         task = state["task_plan"][idx] if idx < len(state["task_plan"]) else {"id": "?", "agent_role": "?"}
         last = state["task_messages"][-1]
@@ -678,11 +611,6 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 if tool_obj is None:
                     result = f"Error: tool '{tool_name}' not found"
                 else:
-                    # config here is what makes each tool call show up in
-                    # LangSmith as its own named "tool:<name>" span with
-                    # tool_args as input and the return value as output —
-                    # this is the "what tool got used, what was its output"
-                    # visibility, without reading console logs.
                     result = tool_obj.invoke(
                         tool_args,
                         config={
@@ -694,10 +622,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
             tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
-        # Mirror into `messages` too — this is the piece that was missing:
-        # the tool actually ran (see the `tool:<name>` run config above),
-        # but its ToolMessage only ever lived in `task_messages`, so it was
-        # invisible in the Messages panel even though the run itself traced fine.
+        # Mirror into `messages` too, same reason as agent_executor_node above
         return {"task_messages": state["task_messages"] + tool_messages, "messages": tool_messages}
 
     def _evaluator_node(self, state: OrchestratorState):
@@ -830,11 +755,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     # ---------- context sharing helper ----------
     @staticmethod
     def _build_context(task_results: dict, task: dict) -> str:
-        """
-        Pass only prior task results into a new task's prompt, instead of the
-        full conversation transcript. Keeps each agent's context small and
-        avoids unbounded context growth as more tasks/agents run.
-        """
+        """Pass only prior task results into a new task's prompt, keeping context small."""
         if not task_results:
             return ""
         lines = [f"- {tid}: {str(res)[:300]}" for tid, res in task_results.items()]
@@ -890,15 +811,9 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         return response
 
 
-# -------------------
-# 5. Initialize Global Agent
-# -------------------
 agent_manager = DynamicAgentManager()
 
 
-# -------------------
-# 6. Helper Functions
-# -------------------
 def get_agent_tools() -> str:
     return agent_manager.get_tool_info()
 
