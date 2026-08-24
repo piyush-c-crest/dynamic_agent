@@ -1,7 +1,7 @@
 import json
 import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
 from dynamic_langgraph_backend import agent_manager
+import document_pipeline as docpipe
 
 app = FastAPI(title="Dynamic Multi-Agent Orchestrator API")
 
@@ -27,6 +28,11 @@ class ChatRequest(BaseModel):
 
 class ThreadResponse(BaseModel):
     thread_id: str
+
+
+class AskDocumentRequest(BaseModel):
+    doc_id: str
+    question: str
 
 
 @app.get("/health")
@@ -60,6 +66,41 @@ def list_threads():
 def thread_messages(thread_id: str):
     """Full saved message history for one thread, e.g. to load when a recent chat is clicked."""
     return {"thread_id": thread_id, "messages": agent_manager.get_thread_history(thread_id)}
+
+
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """Phase 1: extract a PDF/DOCX/TXT/CSV/XLSX file to plain text and store it in memory."""
+    data = await file.read()
+    try:
+        text = docpipe.extract_text(file.filename, data)
+    except docpipe.UnsupportedFileType as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not extract content: {e}")
+
+    doc_id = docpipe.document_store.add(file.filename, text)
+    doc = docpipe.document_store.get(doc_id)
+    return {
+        "doc_id": doc_id,
+        "filename": doc["filename"],
+        "char_count": doc["char_count"],
+        "preview": text[:500],
+    }
+
+
+@app.get("/documents")
+def list_documents():
+    return {"documents": docpipe.document_store.list()}
+
+
+@app.post("/documents/ask")
+def ask_document(req: AskDocumentRequest):
+    """Answer a question grounded only in the uploaded document's extracted text."""
+    try:
+        return docpipe.ask_document(req.doc_id, req.question)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/chat")

@@ -280,6 +280,28 @@
   .send-btn:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; }
   .hint { text-align: center; font-size: 12px; color: var(--text-dim); margin-top: 12px; font-weight: 500; }
 
+  /* Document attach */
+  .attach-btn {
+    width: 36px; height: 36px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: all 0.2s;
+  }
+  .attach-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
+  .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .attach-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
+  .doc-chip {
+    display: none; align-items: center; gap: 8px;
+    max-width: 800px; margin: 0 auto 8px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--sidebar-bg); font-size: 13px; color: var(--text);
+  }
+  .doc-chip.active { display: flex; }
+  .doc-chip svg { width: 15px; height: 15px; fill: none; stroke: var(--accent); stroke-width: 2; flex-shrink: 0; }
+  .doc-chip .doc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .doc-chip .doc-remove { cursor: pointer; color: var(--text-dim); background: none; border: none; font-size: 15px; line-height: 1; padding: 2px 4px; }
+  .doc-chip .doc-remove:hover { color: var(--text); }
+
   /* Mobile responsiveness */
   @media (max-width: 768px) {
     .sidebar {
@@ -323,9 +345,15 @@
       </button>
     </div>
 
+    <input type="file" id="doc-file-input" accept=".pdf,.docx,.txt,.csv,.xlsx" style="display:none;" onchange="handleFileSelected(event)">
+
     <div class="landing" id="landing">
       <h1>What's your <span class="accent-dot">goal</span> today?</h1>
+      <div class="doc-chip" id="doc-chip-landing"></div>
       <div class="input-box" style="max-width:700px; width:100%;">
+        <button class="attach-btn" id="attach-btn-landing" onclick="triggerFileSelect()" title="Attach a document (PDF, DOCX, TXT, CSV, XLSX)">
+          <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
         <textarea id="goal-input-landing" placeholder="Describe what you want done..." rows="1"
           onkeydown="handleKeydown(event, true)" oninput="autoGrow(this)"></textarea>
         <button class="send-btn" onclick="sendFrom(true)">
@@ -340,14 +368,18 @@
 
     <div class="input-area" id="input-area" style="display:none;">
       <div style="width:100%; max-width:800px;">
+        <div class="doc-chip" id="doc-chip-chat"></div>
         <div class="input-box">
+          <button class="attach-btn" id="attach-btn-chat" onclick="triggerFileSelect()" title="Attach a document (PDF, DOCX, TXT, CSV, XLSX)">
+            <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
           <textarea id="goal-input" placeholder="Message Orchestrator..." rows="1"
             onkeydown="handleKeydown(event, false)" oninput="autoGrow(this)"></textarea>
           <button class="send-btn" id="send-btn" onclick="sendFrom(false)">
             <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
           </button>
         </div>
-        <div class="hint">The agent may create new agents or tools automatically to complete this goal.</div>
+        <div class="hint" id="input-hint">The agent may create new agents or tools automatically to complete this goal.</div>
       </div>
     </div>
   </div>
@@ -359,6 +391,66 @@ let threadId = null;
 let threads = JSON.parse(localStorage.getItem('threads') || '[]');
 let busy = false;
 let showAllThreads = false;
+let attachedDoc = null; // { doc_id, filename }
+
+function triggerFileSelect() {
+  if (busy) return;
+  document.getElementById('doc-file-input').click();
+}
+
+async function handleFileSelected(e) {
+  const file = e.target.files[0];
+  e.target.value = ''; // allow re-selecting the same file later
+  if (!file) return;
+
+  renderDocChip({ filename: file.name, uploading: true });
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch(`${API_BASE}/documents/upload`, { method: 'POST', body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Upload failed');
+    }
+    const data = await res.json();
+    attachedDoc = { doc_id: data.doc_id, filename: data.filename };
+    renderDocChip(attachedDoc);
+    updateInputModeForDoc();
+  } catch (err) {
+    attachedDoc = null;
+    renderDocChip(null);
+    alert(err.message || 'Could not process that file.');
+  }
+}
+
+function removeAttachedDoc() {
+  attachedDoc = null;
+  renderDocChip(null);
+  updateInputModeForDoc();
+}
+
+function renderDocChip(doc) {
+  const isLanding = document.getElementById('landing').style.display !== 'none';
+  const chip = document.getElementById(isLanding ? 'doc-chip-landing' : 'doc-chip-chat');
+  const other = document.getElementById(isLanding ? 'doc-chip-chat' : 'doc-chip-landing');
+  [chip, other].forEach(c => { c.classList.remove('active'); c.innerHTML = ''; });
+  if (!doc) return;
+  chip.classList.add('active');
+  chip.innerHTML = `
+    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+    <span class="doc-name">${escapeHtml(doc.filename)}${doc.uploading ? ' — uploading…' : ''}</span>
+    ${doc.uploading ? '' : '<button class="doc-remove" onclick="removeAttachedDoc()" title="Remove">×</button>'}`;
+}
+
+function updateInputModeForDoc() {
+  const hint = document.getElementById('input-hint');
+  if (!hint) return;
+  hint.textContent = attachedDoc
+    ? `Asking questions about "${attachedDoc.filename}". Remove the attachment to run a normal goal instead.`
+    : 'The agent may create new agents or tools automatically to complete this goal.';
+}
 
 async function loadThreadsFromServer() {
   try {
@@ -450,6 +542,7 @@ function newChat() {
   document.getElementById('messages').classList.remove('active');
   document.getElementById('landing').style.display = 'flex';
   document.getElementById('input-area').style.display = 'none';
+  removeAttachedDoc();
   renderThreadList();
   if (window.innerWidth <= 768) closeSidebar();
 }
@@ -552,7 +645,47 @@ function sendFrom(fromLanding) {
 
   if (fromLanding) showChatView();
   addUserMessage(text);
-  runGoal(text);
+
+  if (attachedDoc) {
+    askAboutDocument(text);
+  } else {
+    runGoal(text);
+  }
+}
+
+function askAboutDocument(question) {
+  busy = true;
+  const sendBtn = document.getElementById('send-btn');
+  if (sendBtn) sendBtn.disabled = true;
+
+  const msgDiv = addAssistantMessage();
+  const contentEl = msgDiv.querySelector('.msg-content');
+  const doc = attachedDoc;
+
+  fetch(`${API_BASE}/documents/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ doc_id: doc.doc_id, question }),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Could not answer from the document.');
+      }
+      return res.json();
+    })
+    .then((data) => {
+      const sourceNote = `\n\n---\n*Source: ${data.source.filename}${data.source.truncated ? ' (truncated for context)' : ''}*`;
+      renderMarkdown(contentEl, (data.answer || '') + sourceNote);
+      scrollToBottom();
+    })
+    .catch((err) => {
+      contentEl.innerHTML = `<span style="color:var(--accent);">${escapeHtml(err.message)}</span>`;
+    })
+    .finally(() => {
+      busy = false;
+      if (sendBtn) sendBtn.disabled = false;
+    });
 }
 
 function runGoal(goal) {
