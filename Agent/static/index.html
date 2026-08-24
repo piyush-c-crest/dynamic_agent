@@ -448,7 +448,7 @@ function updateInputModeForDoc() {
   const hint = document.getElementById('input-hint');
   if (!hint) return;
   hint.textContent = attachedDoc
-    ? `Asking questions about "${attachedDoc.filename}". Remove the attachment to run a normal goal instead.`
+    ? `"${attachedDoc.filename}" will be included with your next message.`
     : 'The agent may create new agents or tools automatically to complete this goal.';
 }
 
@@ -595,11 +595,14 @@ function scrollToBottom() {
   m.scrollTop = m.scrollHeight;
 }
 
-function addUserMessage(text) {
+function addUserMessage(text, attachedFilename) {
   const wrap = document.getElementById('messages-inner');
   const div = document.createElement('div');
   div.className = 'msg user';
-  div.innerHTML = `<div class="msg-body"><div class="msg-content">${escapeHtml(text)}</div></div>`;
+  const chip = attachedFilename
+    ? `<div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">📎 ${escapeHtml(attachedFilename)}</div>`
+    : '';
+  div.innerHTML = `<div class="msg-body">${chip}<div class="msg-content">${escapeHtml(text)}</div></div>`;
   wrap.appendChild(div);
   scrollToBottom();
 }
@@ -644,51 +647,14 @@ function sendFrom(fromLanding) {
   autoGrow(inputEl);
 
   if (fromLanding) showChatView();
-  addUserMessage(text);
+  addUserMessage(text, attachedDoc ? attachedDoc.filename : null);
 
-  if (attachedDoc) {
-    askAboutDocument(text);
-  } else {
-    runGoal(text);
-  }
+  const docId = attachedDoc ? attachedDoc.doc_id : null;
+  removeAttachedDoc(); // one-shot attach: content is folded into this message, then cleared
+  runGoal(text, docId);
 }
 
-function askAboutDocument(question) {
-  busy = true;
-  const sendBtn = document.getElementById('send-btn');
-  if (sendBtn) sendBtn.disabled = true;
-
-  const msgDiv = addAssistantMessage();
-  const contentEl = msgDiv.querySelector('.msg-content');
-  const doc = attachedDoc;
-
-  fetch(`${API_BASE}/documents/ask`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ doc_id: doc.doc_id, question }),
-  })
-    .then(async (res) => {
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || 'Could not answer from the document.');
-      }
-      return res.json();
-    })
-    .then((data) => {
-      const sourceNote = `\n\n---\n*Source: ${data.source.filename}${data.source.truncated ? ' (truncated for context)' : ''}*`;
-      renderMarkdown(contentEl, (data.answer || '') + sourceNote);
-      scrollToBottom();
-    })
-    .catch((err) => {
-      contentEl.innerHTML = `<span style="color:var(--accent);">${escapeHtml(err.message)}</span>`;
-    })
-    .finally(() => {
-      busy = false;
-      if (sendBtn) sendBtn.disabled = false;
-    });
-}
-
-function runGoal(goal) {
+function runGoal(goal, docId) {
   busy = true;
   const sendBtn = document.getElementById('send-btn');
   if (sendBtn) sendBtn.disabled = true;
@@ -701,6 +667,7 @@ function runGoal(goal) {
 
   let url = `${API_BASE}/chat/stream?goal=${encodeURIComponent(goal)}`;
   if (threadId) url += `&thread_id=${encodeURIComponent(threadId)}`;
+  if (docId) url += `&doc_id=${encodeURIComponent(docId)}`;
 
   const es = new EventSource(url);
 
@@ -753,6 +720,12 @@ function runGoal(goal) {
   es.addEventListener('final_answer', (e) => {
     const answer = JSON.parse(e.data).answer;
     renderMarkdown(contentEl, answer);
+    scrollToBottom();
+  });
+
+  es.addEventListener('error', (e) => {
+    const msg = JSON.parse(e.data).message || 'Something went wrong.';
+    contentEl.innerHTML = `<span style="color:var(--accent);">${escapeHtml(msg)}</span>`;
     scrollToBottom();
   });
 

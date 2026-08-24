@@ -10,3 +10,4 @@ venv
 *.db-wal
 tools/
 logs.txt
+generated_documents

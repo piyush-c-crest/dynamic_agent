@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -24,15 +25,11 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     goal: str
     thread_id: str | None = None
+    doc_id: str | None = None
 
 
 class ThreadResponse(BaseModel):
     thread_id: str
-
-
-class AskDocumentRequest(BaseModel):
-    doc_id: str
-    question: str
 
 
 @app.get("/health")
@@ -94,20 +91,37 @@ def list_documents():
     return {"documents": docpipe.document_store.list()}
 
 
-@app.post("/documents/ask")
-def ask_document(req: AskDocumentRequest):
-    """Answer a question grounded only in the uploaded document's extracted text."""
-    try:
-        return docpipe.ask_document(req.doc_id, req.question)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+@app.get("/generated-docs")
+def list_generated_documents():
+    """List all files in the generated_documents folder."""
+    files = []
+    if os.path.isdir(docpipe.GENERATED_DOCS_DIR):
+        for fname in sorted(os.listdir(docpipe.GENERATED_DOCS_DIR), reverse=True):
+            fpath = os.path.join(docpipe.GENERATED_DOCS_DIR, fname)
+            if os.path.isfile(fpath):
+                files.append({
+                    "filename": fname,
+                    "size_bytes": os.path.getsize(fpath),
+                    "download_url": f"/generated-docs/{fname}",
+                })
+    return {"files": files}
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    """Run the full graph and return only the final assembled answer."""
+    """Run the full graph and return only the final assembled answer.
+    If doc_id is set, the document's extracted text is folded into the goal
+    message so the planner/agents see it like any other input."""
     thread_id = req.thread_id or str(uuid.uuid4())
-    result = agent_manager.run(req.goal, thread_id)
+    try:
+        effective_goal = (
+            docpipe.build_prompt_with_document(req.goal, req.doc_id)
+            if req.doc_id else req.goal
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    result = agent_manager.run(effective_goal, thread_id)
     messages = result.get("messages", [])
     final_answer = messages[-1].content if messages else ""
     return {"thread_id": thread_id, "answer": final_answer}
@@ -117,19 +131,29 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _stream_events(goal: str, thread_id: str):
+def _stream_events(goal: str, thread_id: str, doc_id: str | None = None):
+    if doc_id:
+        try:
+            effective_goal = docpipe.build_prompt_with_document(goal, doc_id)
+        except KeyError as e:
+            yield _sse("error", {"message": str(e)})
+            yield _sse("done", {"answer": ""})
+            return
+    else:
+        effective_goal = goal
+
     config = {
         "configurable": {"thread_id": thread_id},
         "run_name": "orchestrator_run",
         "tags": ["orchestrator_run", "fastapi"],
-        "metadata": {"goal": goal, "thread_id": thread_id},
+        "metadata": {"goal": goal, "thread_id": thread_id, "doc_id": doc_id},
     }
 
     yield _sse("thread", {"thread_id": thread_id})
 
     final_answer = ""
     for update in agent_manager.chatbot.stream(
-        {"messages": [HumanMessage(content=goal)]},
+        {"messages": [HumanMessage(content=effective_goal)]},
         config=config,
         stream_mode="updates",
     ):
@@ -159,12 +183,15 @@ def _stream_events(goal: str, thread_id: str):
 
 
 @app.get("/chat/stream")
-def chat_stream(goal: str, thread_id: str | None = None):
+def chat_stream(goal: str, thread_id: str | None = None, doc_id: str | None = None):
     tid = thread_id or str(uuid.uuid4())
     return StreamingResponse(
-        _stream_events(goal, tid),
+        _stream_events(goal, tid, doc_id),
         media_type="text/event-stream",
     )
 
+
+# Serve generated documents as downloadable static files
+app.mount("/generated-docs", StaticFiles(directory=docpipe.GENERATED_DOCS_DIR), name="generated_docs")
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

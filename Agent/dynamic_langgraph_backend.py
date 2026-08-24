@@ -21,6 +21,8 @@ from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
 
+import document_pipeline as docpipe
+
 load_dotenv()
 
 # ---------- terminal output -> file logging ----------
@@ -166,6 +168,9 @@ class DynamicToolRegistry:
         self.register_tool("search", self._search_tool())
         self.register_tool("calculator", self._calculator_tool())
         self.register_tool("stock_price", self._stock_price_tool())
+        self.register_tool("read_document", self._read_document_tool())
+        self.register_tool("list_documents", self._list_documents_tool())
+        self.register_tool("generate_document", self._generate_document_tool())
 
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
         """Register a tool, forcing tool_obj.name to match the registry key."""
@@ -234,6 +239,83 @@ class DynamicToolRegistry:
             except Exception as e:
                 return {"error": str(e)}
         return get_stock_price
+
+    @staticmethod
+    def _read_document_tool() -> BaseTool:
+        @tool
+        def read_document(doc_id: str) -> dict:
+            """Read the content of an uploaded document by its doc_id.
+
+            Use this tool when the user asks about, references, or wants to
+            read a previously uploaded file. Returns the extracted text along
+            with metadata (filename, character count, upload time).
+
+            Parameters
+            ----------
+            doc_id : str
+                The document ID returned by the upload endpoint.
+            """
+            doc = docpipe.document_store.get(doc_id)
+            if doc is None:
+                return {"error": f"No document found with id: {doc_id}"}
+            return {
+                "doc_id": doc["doc_id"],
+                "filename": doc["filename"],
+                "char_count": doc["char_count"],
+                "uploaded_at": doc["uploaded_at"],
+                "content": doc["text"][:docpipe.MAX_CHARS_FOR_CONTEXT],
+                "truncated": len(doc["text"]) > docpipe.MAX_CHARS_FOR_CONTEXT,
+            }
+        return read_document
+
+    @staticmethod
+    def _list_documents_tool() -> BaseTool:
+        @tool
+        def list_documents(query: str = "") -> dict:
+            """List all uploaded documents with their IDs, filenames, sizes, and upload times.
+
+            Use this tool when you need to find which documents have been
+            uploaded, or when the user references a document by name and you
+            need to look up its doc_id.
+
+            Parameters
+            ----------
+            query : str
+                Optional search filter (not yet implemented, pass empty string).
+            """
+            docs = docpipe.document_store.list()
+            return {
+                "count": len(docs),
+                "documents": docs,
+            }
+        return list_documents
+
+    @staticmethod
+    def _generate_document_tool() -> BaseTool:
+        @tool
+        def generate_document(content: str, filename: str = "document", format: str = "pdf") -> dict:
+            """Generate a document file (PDF, DOCX, or TXT) from text content and save it to disk.
+
+            Use this tool when the user asks you to create, generate, or export
+            a document, report, summary, or any written content as a
+            downloadable file.
+
+            The generated file is saved to a 'generated_documents' folder and
+            a download URL is returned.
+
+            Parameters
+            ----------
+            content : str
+                The text or markdown content to write into the document.
+                Supports markdown headings (#) and bullet points (- or *).
+            filename : str
+                Base name for the output file (e.g. 'quarterly_report').
+                The correct extension is added automatically.
+            format : str
+                Output format: 'pdf', 'docx', or 'txt'. Defaults to 'pdf'.
+            """
+            return docpipe.generate_document(content, filename, format)
+        return generate_document
 
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
