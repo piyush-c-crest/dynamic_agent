@@ -5,7 +5,7 @@ from langchain_core.messages import (
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph.message import add_messages
-from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.utilities import GoogleSerperAPIWrapper
 from langchain_core.tools import tool, Tool, BaseTool
 from dotenv import load_dotenv
 import os
@@ -78,6 +78,7 @@ MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
+MAX_TOOL_CALLS_PER_TASK = 3  # max consecutive tool calls per task to prevent infinite loops
 
 llm = ChatOpenAI(
     model="openai.gpt-oss-120b"
@@ -198,9 +199,9 @@ class DynamicToolRegistry:
         @tool
         def search(query: str) -> str:
             """Search the web for information"""
-            search_tool = DuckDuckGoSearchRun(region="us-en")
+            search_tool = GoogleSerperAPIWrapper(region="us-en")
             result = search_tool.run(query)
-            return result[:500]
+            return result
         return search
 
     @staticmethod
@@ -503,15 +504,11 @@ Rules:
         descriptions = self.tool_registry.list_tools()
         lines = [f'- {name}: {descriptions.get(name, "")}' for name in tool_names]
         return (
-            "\n\nTOOL USE IS MANDATORY WHEN RELEVANT. You have real, working tools:\n"
+            "\n\nTOOL USE GUIDELINES:\n"
             + "\n".join(lines)
-            + "\n\nIf completing this task requires information you don't already "
-            "have with certainty (current events, prices, live data, computation, "
-            "etc.), you MUST call the appropriate tool above to get it. Do NOT say "
-            "you cannot browse the internet, do NOT ask the user to supply data "
-            "that one of your tools can retrieve, and do NOT answer from memory "
-            "when a tool exists to get current facts. Only ask the user a question "
-            "if none of your tools can obtain what's needed."
+            + "\n\n1. If completing this task requires external or live data (prices, search results, computation), call the appropriate tool above.\n"
+            "2. CRITICAL: If you have already executed a tool call and received results in a ToolMessage, DO NOT call the tool again for the same query. Synthesize your final answer using the retrieved results immediately.\n"
+            "3. Do NOT make redundant or repeated tool calls once information has been fetched."
         )
 
     @traceable(name="create_agent", run_type="chain")
@@ -703,6 +700,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 HumanMessage(content=init_prompt),
             ]
 
+        # Check if max tool calls limit is reached for this task
+        tool_results_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+        if tool_results_count >= MAX_TOOL_CALLS_PER_TASK:
+            task_messages = task_messages + [
+                HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far.")
+            ]
+
         print(f"🤖 [{role}] executing task {task['id']}: {task['description']}")
         response = agent["llm"].invoke(
             task_messages,
@@ -751,7 +755,12 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         task_messages = state["task_messages"]
-        final_content = task_messages[-1].content or ""
+        final_content = (task_messages[-1].content if task_messages else "") or ""
+        if not final_content and task_messages:
+            for m in reversed(task_messages):
+                if getattr(m, "content", None):
+                    final_content = str(m.content)
+                    break
 
         eval_prompt = f"""
 Task: {task['description']}
@@ -835,8 +844,12 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
 
     @staticmethod
     def _route_after_agent(state: OrchestratorState):
-        last = state["task_messages"][-1]
-        if getattr(last, "tool_calls", None):
+        task_messages = state.get("task_messages", [])
+        if not task_messages:
+            return "evaluator"
+        last = task_messages[-1]
+        tool_call_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+        if getattr(last, "tool_calls", None) and tool_call_count < MAX_TOOL_CALLS_PER_TASK:
             return "tools"
         return "evaluator"
 
