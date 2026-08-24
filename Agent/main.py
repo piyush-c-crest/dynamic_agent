@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
-from dynamic_langgraph_backend import agent_manager, _token_usage_ctx
+from dynamic_langgraph_backend import agent_manager
 
 app = FastAPI(title="Dynamic Multi-Agent Orchestrator API")
 
@@ -86,42 +86,35 @@ def _stream_events(goal: str, thread_id: str):
 
     yield _sse("thread", {"thread_id": thread_id})
 
-    usage_records: list = []
-    ctx_token = _token_usage_ctx.set(usage_records)
     final_answer = ""
-    try:
-        for update in agent_manager.chatbot.stream(
-            {"messages": [HumanMessage(content=goal)]},
-            config=config,
-            stream_mode="updates",
-        ):
-            for node_name, node_output in update.items():
+    for update in agent_manager.chatbot.stream(
+        {"messages": [HumanMessage(content=goal)]},
+        config=config,
+        stream_mode="updates",
+    ):
+        for node_name, node_output in update.items():
 
-                if node_name == "planner":
-                    yield _sse("plan", {"task_plan": node_output.get("task_plan", [])})
+            if node_name == "planner":
+                yield _sse("plan", {"task_plan": node_output.get("task_plan", [])})
 
-                elif node_name == "agent_executor":
-                    yield _sse("status", {"message": "agent working on current task"})
+            elif node_name == "agent_executor":
+                yield _sse("status", {"message": "agent working on current task"})
 
-                elif node_name == "tools":
-                    yield _sse("status", {"message": "executing tool call(s)"})
+            elif node_name == "tools":
+                yield _sse("status", {"message": "executing tool call(s)"})
 
-                elif node_name == "evaluator":
-                    verdict = node_output.get("last_verdict", {})
-                    yield _sse("evaluation", verdict)
+            elif node_name == "evaluator":
+                verdict = node_output.get("last_verdict", {})
+                yield _sse("evaluation", verdict)
 
-                elif node_name == "assembler":
-                    msgs = node_output.get("messages", [])
-                    if msgs:
-                        final_answer = msgs[-1].content
-                        yield _sse("final_answer", {"answer": final_answer})
-    finally:
-        _token_usage_ctx.reset(ctx_token)
+            elif node_name == "assembler":
+                msgs = node_output.get("messages", [])
+                if msgs:
+                    final_answer = msgs[-1].content
+                    yield _sse("final_answer", {"answer": final_answer})
 
-    token_usage = agent_manager._summarize_token_usage(usage_records)
-    agent_manager._print_token_usage(goal, token_usage)
-    yield _sse("token_usage", token_usage)
-    yield _sse("done", {"answer": final_answer, "token_usage": token_usage})
+    print(f"\n✅ Stream finished for prompt: {goal[:80]!r}")
+    yield _sse("done", {"answer": final_answer})
 
 
 @app.get("/chat/stream")
