@@ -11,3 +11,4 @@ venv
 tools/
 logs.txt
 generated_documents
+tool_envs

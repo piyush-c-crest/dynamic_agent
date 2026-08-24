@@ -17,8 +17,12 @@ import re
 import base64
 import operator
 import contextvars
+import subprocess
+import venv
 from datetime import datetime
 from langchain_openai import ChatOpenAI
+from langchain_core.tools import StructuredTool
+from pydantic import create_model, Field
 from langsmith import traceable
 
 import document_pipeline as docpipe
@@ -79,7 +83,7 @@ if not os.environ.get("LANGCHAIN_API_KEY"):
 MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
-MAX_TOOL_VALIDATION_RETRIES = 1  # repair attempts if a generated tool fails its smoke test
+MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its smoke test
 MAX_TOOL_CALLS_PER_TASK = 3  # max consecutive tool calls per task to prevent infinite loops
 
 llm = ChatOpenAI(
@@ -156,11 +160,147 @@ def _format_conversation_history(history: list[dict], max_turns: int = MAX_HISTO
     return "\n".join(lines)
 
 
+# Generic runner that gets executed with the shared venv's interpreter, in a
+# clean subprocess, for every dynamically generated tool call. Kept
+# dependency-free (stdlib only) so it works before any pip install happens.
+_SANDBOX_RUNNER_SOURCE = '''
+import sys, json, importlib.util
+
+def main():
+    module_path, func_name = sys.argv[1], sys.argv[2]
+    kwargs = json.loads(sys.stdin.read() or "{}")
+
+    spec = importlib.util.spec_from_file_location("generated_tool_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    target = getattr(module, func_name)
+    result = target(**kwargs)
+
+    print(json.dumps({"ok": True, "result": result}, default=str))
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))
+        sys.exit(1)
+'''
+
+
+class ToolSandboxExecutor:
+    """
+    Runs every dynamically created tool's generated code through ONE shared
+    venv + a subprocess per call, so tool code can `import` any pip package
+    without the main process ever needing that package (or being able to be
+    crashed/hung by broken generated code).
+
+    Trade-off vs a venv per tool: one shared site-packages means two tools
+    that need conflicting versions of the same package can step on each
+    other. Acceptable for an initial build where AUTO_TOOL_LIMIT already
+    caps tool creation; if that ever bites, give just the conflicting tool
+    its own venv (base_dir=f"tool_envs/{tool_name}") rather than switching
+    the whole system over.
+    """
+
+    def __init__(self, base_dir: str = "tool_envs/shared", timeout_s: int = 25, install_timeout_s: int = 180):
+        self.base_dir = base_dir
+        self.timeout_s = timeout_s
+        self.install_timeout_s = install_timeout_s
+        self.tools_dir = os.path.join(base_dir, "tools")
+        os.makedirs(self.tools_dir, exist_ok=True)
+
+        self._runner_path = os.path.join(base_dir, "_sandbox_runner.py")
+        with open(self._runner_path, "w", encoding="utf-8") as f:
+            f.write(_SANDBOX_RUNNER_SOURCE)
+
+        self._venv_dir = os.path.join(base_dir, "venv")
+        self._installed_cache_path = os.path.join(base_dir, "_installed.json")
+        self._installed: set[str] = set()
+        self._load_installed_cache()
+
+    # ---------- paths ----------
+    def _venv_python(self) -> str:
+        rel = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
+        return os.path.join(self._venv_dir, *rel)
+
+    def _module_path(self, tool_name: str) -> str:
+        return os.path.join(self.tools_dir, f"{tool_name}.py")
+
+    def _load_installed_cache(self):
+        if os.path.exists(self._installed_cache_path):
+            try:
+                with open(self._installed_cache_path, "r", encoding="utf-8") as f:
+                    self._installed = set(json.load(f))
+            except (json.JSONDecodeError, OSError):
+                self._installed = set()
+
+    def _save_installed_cache(self):
+        with open(self._installed_cache_path, "w", encoding="utf-8") as f:
+            json.dump(sorted(self._installed), f)
+
+    # ---------- setup (called once per tool, at creation time) ----------
+    def ensure_env(self, tool_name: str, requirements: list[str] | None = None):
+        """Create the shared venv on first use, then install only the packages not already present."""
+        if not os.path.exists(self._venv_dir):
+            print("🐍 Creating shared tool venv (first dynamic tool)...")
+            venv.EnvBuilder(with_pip=True, clear=True).create(self._venv_dir)
+
+        missing = [r for r in (requirements or []) if r.lower() not in self._installed]
+        if missing:
+            print(f"📦 Installing {missing} (needed by '{tool_name}') into shared venv...")
+            proc = subprocess.run(
+                [self._venv_python(), "-m", "pip", "install", "-q",
+                 "--disable-pip-version-check", *missing],
+                capture_output=True, text=True, timeout=self.install_timeout_s,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to install requirements for tool '{tool_name}': {proc.stderr[-800:]}"
+                )
+            self._installed.update(r.lower() for r in missing)
+            self._save_installed_cache()
+        elif requirements:
+            print(f"📦 All requirements for '{tool_name}' already present in shared venv, skipping install.")
+
+    def save_tool_module(self, tool_name: str, code: str) -> str:
+        """Persist the generated (import-allowed) source into the shared tools folder."""
+        path = self._module_path(tool_name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code)
+        return path
+
+    # ---------- execution (called on every tool invocation) ----------
+    def run(self, tool_name: str, func_name: str, kwargs: dict) -> Any:
+        module_path = self._module_path(tool_name)
+        try:
+            proc = subprocess.run(
+                [self._venv_python(), self._runner_path, module_path, func_name],
+                input=json.dumps(kwargs),
+                capture_output=True, text=True, timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Tool '{tool_name}' timed out after {self.timeout_s}s")
+
+        if not proc.stdout.strip():
+            raise RuntimeError(f"Tool '{tool_name}' produced no output. stderr: {proc.stderr[-800:]}")
+
+        try:
+            payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Tool '{tool_name}' returned non-JSON output: {proc.stdout[-800:]}")
+
+        if not payload.get("ok"):
+            raise RuntimeError(f"Tool '{tool_name}' error: {payload.get('error')}")
+        return payload["result"]
+
+
 class DynamicToolRegistry:
     """Manages dynamic tool creation and registration."""
     def __init__(self):
         self.tools: dict[str, BaseTool] = {}
         self.tool_code: dict[str, str] = {}
+        self.sandbox = ToolSandboxExecutor()
         self._register_default_tools()
 
     def _register_default_tools(self):
@@ -198,6 +338,47 @@ class DynamicToolRegistry:
     def list_tools(self) -> dict[str, str]:
         """List all tools with their descriptions"""
         return {name: tool.description for name, tool in self.tools.items()}
+
+    _DEFAULT_TOOL_NAMES = (
+        "search", "calculator", "stock_price",
+        "read_document", "list_documents", "generate_document",
+    )
+
+    def remove_tool(self, name: str, delete_generated_code: bool = True) -> bool:
+        """
+        Remove a dynamically created tool so it's no longer offered to any
+        agent. Deliberately does NOT touch the shared venv's installed
+        packages or the install cache — those stay put so that if this tool
+        (or another one needing the same packages) is auto-created again
+        later, it won't need to reinstall anything.
+
+        delete_generated_code=False keeps the .py source files on disk
+        (e.g. if you just want to unregister it temporarily but might
+        restore the exact same code later); default True removes them so a
+        future creation for the same tool_name starts clean.
+        """
+        if name not in self.tools:
+            print(f"⚠️ Tool '{name}' not found in registry, nothing to remove.")
+            return False
+        if name in self._DEFAULT_TOOL_NAMES:
+            print(f"⚠️ Refusing to remove built-in tool '{name}'.")
+            return False
+
+        del self.tools[name]
+        self.tool_code.pop(name, None)
+
+        if delete_generated_code:
+            # the copy register_tool() persisted for reference/inspection
+            persisted_path = os.path.join(os.path.dirname(__file__), "tools", f"{name}.py")
+            if os.path.exists(persisted_path):
+                os.remove(persisted_path)
+            # the sandbox's own copy, so create_tool_from_prompt starts fresh next time
+            module_path = self.sandbox._module_path(name)
+            if os.path.exists(module_path):
+                os.remove(module_path)
+
+        print(f"🗑️ Tool '{name}' removed from registry.")
+        return True
 
     @staticmethod
     def _search_tool() -> BaseTool:
@@ -319,34 +500,44 @@ class DynamicToolRegistry:
 
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
-        """Create a new tool from a natural language prompt, run in a restricted-builtins sandbox."""
+        """Create a new tool from a natural language prompt, run in an isolated venv + subprocess sandbox."""
         print(f"🔨 Creating tool '{tool_name}' from prompt...")
 
         creation_prompt = f"""
-        Create a Python tool function for the following requirement:
+        Create a Python tool for the following requirement:
         {prompt}
 
-        Requirements:
-        1. Use the @tool decorator from langchain_core.tools
-        2. Include a clear docstring
-        3. Handle errors gracefully
-        4. Return JSON-serializable data
-        5. Keep it focused and simple
-        6. Do not use file I/O, os, subprocess, eval, exec, or import statements
+        This code will run in its own isolated subprocess (its own venv), so
+        you MAY use import statements for third-party packages — anything on
+        PyPI is fine. Do NOT use os, subprocess, eval, or exec.
 
-        Example format:
+        Respond with ONLY a single JSON object, no prose, no markdown fences,
+        in exactly this shape:
+        {{
+          "requirements": ["package_name", ...],
+          "function_name": "{tool_name}",
+          "docstring": "one sentence describing what this tool does, shown to the agent as the tool's description",
+          "args_schema": {{
+            "arg_name": {{"type": "string", "description": "..."}}
+          }},
+          "code": "def {tool_name}(arg_name: str) -> dict:\\n    ...\\n    return {{...}}"
+        }}
 
-        @tool
-        def {tool_name}(input_data: str) -> dict:
-            Description of what the tool does.
-            code implementation here
-
-        Return ONLY the function code, starting with @tool and ending with the return statement.
-        No imports needed (they're already available: requests, json, datetime, re, base64).
-        If the task requires returning file/image bytes to the caller (e.g. delivering a
-        generated file), fetch or produce the bytes and return them base64-encoded
-        (e.g. base64.b64encode(data).decode("utf-8")) as a JSON-serializable string field,
-        rather than only returning an external URL.
+        Rules for "requirements": pip package names this code imports; [] if
+        none beyond the standard library.
+        Rules for "code":
+        1. A single top-level function named exactly "{tool_name}" whose
+           parameters match args_schema.
+        2. No @tool decorator — this file is imported and called directly
+           inside the sandbox, not through langchain.
+        3. Handle errors gracefully (try/except) and always return a
+           JSON-serializable value.
+        4. Keep it focused and simple.
+        5. If the task requires returning file/image bytes, base64-encode
+           them (e.g. base64.b64encode(data).decode("utf-8")) as a string
+           field rather than returning only an external URL.
+        6. Valid "type" values for args_schema entries: string, integer,
+           number, boolean, array, object.
         """
 
         response = llm.invoke(
@@ -358,43 +549,29 @@ class DynamicToolRegistry:
             },
         )
         _record_token_usage(f"tool_codegen:{tool_name}", response, ["tool_creation"])
-        tool_code = response.content
-        print(f"📝 Generated code for tool '{tool_name}':\n{tool_code}")
+        current_spec_text = response.content
+        print(f"📝 Generated spec for tool '{tool_name}':\n{current_spec_text}")
 
-        safe_builtins = {
-            "len": len, "str": str, "int": int, "float": float, "bool": bool,
-            "list": list, "dict": dict, "tuple": tuple, "set": set,
-            "range": range, "enumerate": enumerate, "zip": zip,
-            "min": min, "max": max, "sum": sum, "sorted": sorted, "round": round,
-            "abs": abs, "isinstance": isinstance, "print": print,
-            "Exception": Exception, "ValueError": ValueError,
-            "TypeError": TypeError, "KeyError": KeyError, "True": True,
-            "False": False, "None": None,
-        }
-        safe_globals = {
-            "__builtins__": safe_builtins,
-            "tool": tool,
-            "requests": requests,
-            "json": json,
-            "datetime": datetime,
-            "re": re,
-            "base64": base64,
-        }
-
-        current_code = tool_code
         last_error = None
 
         for attempt in range(MAX_TOOL_VALIDATION_RETRIES + 1):
-            cleaned_code = self._extract_code_block(current_code)
             try:
-                local_vars = {}
-                exec(cleaned_code, safe_globals, local_vars)
+                spec = parse_json_safely(self._extract_code_block(current_spec_text), default=None)
+                if not spec or "code" not in spec or "function_name" not in spec:
+                    raise ValueError("Model did not return the expected JSON tool spec (missing 'code' or 'function_name').")
 
-                created_tool = next(
-                    (v for v in local_vars.values() if isinstance(v, BaseTool)), None
+                cleaned_code = spec["code"]
+                requirements = spec.get("requirements") or []
+
+                self.sandbox.ensure_env(tool_name, requirements)
+                self.sandbox.save_tool_module(tool_name, cleaned_code)
+
+                created_tool = self._build_structured_tool(
+                    tool_name=tool_name,
+                    function_name=spec["function_name"],
+                    docstring=spec.get("docstring", f"Dynamically created tool: {tool_name}"),
+                    args_schema=spec.get("args_schema", {}),
                 )
-                if created_tool is None:
-                    raise ValueError("Generated code did not define a @tool-decorated function.")
 
                 ok, smoke_message = self._smoke_test_tool(created_tool)
                 if not ok:
@@ -412,19 +589,20 @@ class DynamicToolRegistry:
                     break
 
                 repair_prompt = f"""
-                    The following tool code failed with this error:
+                    The following tool spec failed with this error:
                     {last_error}
 
-                    Original code:
-                    {cleaned_code}
+                    Original spec:
+                    {current_spec_text}
 
-                    Fix the code so it runs correctly and satisfies the original requirement:
+                    Fix it so it runs correctly and satisfies the original requirement:
                     {prompt}
 
-                    Same rules as before: use @tool, no file I/O/os/subprocess/eval/exec/imports,
-                    handle errors gracefully, return JSON-serializable data.
-                    Available modules (no import needed): requests, json, datetime, re, base64.
-                    Return ONLY the corrected function code, starting with @tool.
+                    Same rules as before: respond with ONLY the corrected JSON
+                    object (requirements, function_name, docstring,
+                    args_schema, code). The function may use import
+                    statements for third-party packages, but not os,
+                    subprocess, eval, or exec.
                 """
                 response = llm.invoke(
                     repair_prompt,
@@ -435,7 +613,7 @@ class DynamicToolRegistry:
                     },
                 )
                 _record_token_usage(f"tool_codegen_repair:{tool_name}", response, ["tool_creation", "repair"])
-                current_code = response.content
+                current_spec_text = response.content
 
         print(f"❌ Error creating tool '{tool_name}': {last_error}")
         raise RuntimeError(
@@ -445,11 +623,43 @@ class DynamicToolRegistry:
 
     @staticmethod
     def _extract_code_block(raw: str) -> str:
-        if "```python" in raw:
+        if "```json" in raw:
+            return raw.split("```json")[1].split("```")[0]
+        elif "```python" in raw:
             return raw.split("```python")[1].split("```")[0]
         elif "```" in raw:
             return raw.split("```")[1].split("```")[0]
         return raw
+
+    @staticmethod
+    def _args_model(tool_name: str, args_schema: dict):
+        """Turn the LLM's args_schema JSON into a pydantic model for StructuredTool."""
+        if not args_schema:
+            return None
+        type_map = {
+            "string": str, "integer": int, "number": float,
+            "boolean": bool, "array": list, "object": dict,
+        }
+        fields = {}
+        for arg_name, info in args_schema.items():
+            py_type = type_map.get((info or {}).get("type", "string"), str)
+            description = (info or {}).get("description", "")
+            fields[arg_name] = (py_type, Field(..., description=description))
+        return create_model(f"{tool_name}_Args", **fields)
+
+    def _build_structured_tool(self, tool_name: str, function_name: str, docstring: str, args_schema: dict) -> BaseTool:
+        """Wrap a call into the sandbox as a normal langchain BaseTool, so nothing downstream changes."""
+        args_model = self._args_model(tool_name, args_schema)
+
+        def _invoke(**kwargs):
+            return self.sandbox.run(tool_name, function_name, kwargs)
+
+        return StructuredTool.from_function(
+            func=_invoke,
+            name=tool_name,
+            description=docstring,
+            args_schema=args_model,
+        )
 
     @staticmethod
     def _generate_dummy_args(tool_obj: BaseTool) -> dict:
@@ -664,6 +874,22 @@ Rules:
             role: {"system_prompt": conf["system_prompt"], "tools": conf["tool_names"]}
             for role, conf in self.agents.items()
         }
+
+    def remove_tool_from_agents(self, tool_name: str):
+        """Strip a removed tool out of every agent that currently holds it, and
+        rebind each affected agent's llm so the tool no longer appears in the
+        schema it sees or in its tool_directive. Leaves agents unaffected if
+        they never had this tool."""
+        for role, conf in self.agents.items():
+            if tool_name not in conf["tool_names"]:
+                continue
+            conf["tool_names"] = [t for t in conf["tool_names"] if t != tool_name]
+            remaining_tools = [
+                self.tool_registry.get_tool(n) for n in conf["tool_names"]
+            ]
+            remaining_tools = [t for t in remaining_tools if t is not None]
+            conf["llm"] = llm.bind_tools(remaining_tools) if remaining_tools else llm
+            print(f"🔄 Agent '{role}' tools after removing '{tool_name}': {conf['tool_names']}")
 
 
 class DynamicAgentManager:
@@ -996,6 +1222,22 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             print(f"❌ Failed to add tool: {e}")
             return False
 
+    def remove_tool(self, tool_name: str) -> bool:
+        """
+        Unregister a tool so no agent can call it and the LLM stops seeing it
+        in "Available tools" (used by create_agent/refresh_tools when
+        deciding whether to reuse or auto-create a tool). If a task later
+        needs equivalent functionality again, the normal auto-tool-creation
+        path (_create_missing_tools) will recreate it from scratch, since it
+        no longer matches anything in list_tools().
+        """
+        removed = self.tool_registry.remove_tool(tool_name)
+        if removed:
+            self.agent_factory.remove_tool_from_agents(tool_name)
+            self.chatbot = self._build_graph()
+            print(f"✅ Graph rebuilt after removing tool: {tool_name}")
+        return removed
+
     def get_tool_info(self) -> str:
         return json.dumps(self.tool_registry.list_tools(), indent=2)
 
@@ -1132,6 +1374,10 @@ def get_agent_registry() -> str:
 
 def add_tool_dynamically(tool_name: str, tool_prompt: str) -> bool:
     return agent_manager.add_tool_from_prompt(tool_prompt, tool_name)
+
+
+def remove_tool_dynamically(tool_name: str) -> bool:
+    return agent_manager.remove_tool(tool_name)
 
 
 def run_agent_with_requirements(user_input: str, thread_id: str, requirements: dict = None):
