@@ -1,0 +1,873 @@
+Provider: xAI
+Name: Grok 4.6
+------------------------------------------------------------
+Model: amazon.nova-pro-v1:0
+Provider: Amazon
+Name: Nova Pro
+------------------------------------------------------------
+Model: amazon.nova-pro-v1:0:24k
+Provider: Amazon
+Name: Nova Pro
+------------------------------------------------------------
+Model: amazon.nova-pro-v1:0:300k
+Provider: Amazon
+Name: Nova Pro
+------------------------------------------------------------
+Model: amazon.nova-2-lite-v1:0
+Provider: Amazon
+Name: Nova 2 Lite
+------------------------------------------------------------
+Model: amazon.nova-2-lite-v1:0:256k
+Provider: Amazon
+Name: Nova 2 Lite
+------------------------------------------------------------
+Model: minimax.minimax-m2.5
+Provider: MiniMax
+Name: MiniMax M2.5
+------------------------------------------------------------
+Model: google.gemma-3-12b-it
+Provider: Google
+Name: Gemma 3 12B IT
+------------------------------------------------------------
+Model: moonshot.kimi-k2-thinking
+Provider: Moonshot AI
+Name: Kimi K2 Thinking
+------------------------------------------------------------
+Model: mistral.mistral-large-3-675b-instruct
+Provider: Mistral AI
+Name: Mistral Large 3
+------------------------------------------------------------
+Model: twelvelabs.pegasus-1-2-v1:0
+Provider: TwelveLabs
+Name: Pegasus v1.2
+------------------------------------------------------------
+Model: amazon.nova-2-sonic-v1:0
+Provider: Amazon
+Name: Nova 2 Sonic
+------------------------------------------------------------
+Model: mistral.devstral-2-123b
+Provider: Mistral AI
+Name: Devstral 2 123B
+------------------------------------------------------------
+Model: minimax.minimax-m2.1
+Provider: MiniMax
+Name: MiniMax M2.1
+------------------------------------------------------------
+Model: nvidia.nemotron-super-3-120b
+Provider: NVIDIA
+Name: NVIDIA Nemotron 3 Super 120B A12B
+------------------------------------------------------------
+Model: qwen.qwen3-32b-v1:0
+Provider: Qwen
+Name: Qwen3 32B (dense)
+------------------------------------------------------------
+Model: mistral.ministral-3-14b-instruct
+Provider: Mistral AI
+Name: Ministral 14B 3.0
+------------------------------------------------------------
+Model: anthropic.claude-opus-4-6-v1
+Provider: Anthropic
+Name: Claude Opus 4.6
+------------------------------------------------------------
+Model: writer.palmyra-x5-v1:0
+Provider: Writer
+Name: Palmyra X5
+------------------------------------------------------------
+Model: nvidia.nemotron-nano-9b-v2
+Provider: NVIDIA
+Name: NVIDIA Nemotron Nano 9B v2
+------------------------------------------------------------
+Model: mistral.ministral-3-8b-instruct
+Provider: Mistral AI
+Name: Ministral 3 8B
+------------------------------------------------------------
+Model: mistral.voxtral-small-24b-2507
+Provider: Mistral AI
+Name: Voxtral Small 24B 2507
+------------------------------------------------------------
+Model: zai.glm-5
+Provider: Z.AI
+Name: GLM 5
+------------------------------------------------------------
+Model: openai.gpt-oss-20b-1:0
+Provider: OpenAI
+Name: gpt-oss-20b
+------------------------------------------------------------
+Model: anthropic.claude-opus-5
+Provider: Anthropic
+Name: Claude Opus 5
+------------------------------------------------------------
+Model: google.gemma-3-4b-it
+Provider: Google
+Name: Gemma 3 4B IT
+------------------------------------------------------------
+Model: anthropic.claude-opus-4-8
+Provider: Anthropic
+Name: Claude Opus 4.8
+------------------------------------------------------------
+Model: anthropic.claude-opus-4-7
+Provider: Anthropic
+Name: Claude Opus 4.7
+------------------------------------------------------------
+Model: openai.gpt-oss-safeguard-120b
+Provider: OpenAI
+Name: GPT OSS Safeguard 120B
+------------------------------------------------------------
+Model: google.gemma-3-27b-it
+Provider: Google
+Name: Gemma 3 27B PT
+------------------------------------------------------------
+Model: writer.palmyra-x4-v1:0
+Provider: Writer
+Name: Palmyra X4
+------------------------------------------------------------
+Model: anthropic.claude-sonnet-4-5-20250929-v1:0
+Provider: Anthropic
+Name: Claude Sonnet 4.5
+------------------------------------------------------------
+Model: qwen.qwen3-vl-235b-a22b
+Provider: Qwen
+Name: Qwen3 VL 235B A22B
+------------------------------------------------------------
+Model: zai.glm-4.7
+Provider: Z.AI
+Name: GLM 4.7
+------------------------------------------------------------
+Model: writer.palmyra-vision-7b
+Provider: Writer
+Name: Writer Palmyra Vision 7B
+------------------------------------------------------------
+Model: openai.gpt-5.6-luna
+Provider: OpenAI
+Name: GPT-5.6 Luna
+------------------------------------------------------------
+Model: anthropic.claude-sonnet-5
+Provider: Anthropic
+Name: Claude Sonnet 5
+------------------------------------------------------------
+Model: anthropic.claude-opus-4-1-20250805-v1:0
+Provider: Anthropic
+Name: Claude Opus 4.1
+------------------------------------------------------------
+Model: mistral.magistral-small-2509
+Provider: Mistral AI
+Name: Magistral Small 2509
+------------------------------------------------------------
+Model: openai.gpt-5.6-sol
+Provider: OpenAI
+Name: GPT-5.6 Sol
+------------------------------------------------------------
+Model: mistral.ministral-3-3b-instruct
+Provider: Mistral AI
+Name: Ministral 3B
+------------------------------------------------------------
+Model: anthropic.claude-opus-4-5-20251101-v1:0
+Provider: Anthropic
+Name: Claude Opus 4.5
+------------------------------------------------------------
+Model: qwen.qwen3-coder-30b-a3b-v1:0
+Provider: Qwen
+Name: Qwen3-Coder-30B-A3B-Instruct
+------------------------------------------------------------
+Model: openai.gpt-oss-safeguard-20b
+Provider: OpenAI
+Name: GPT OSS Safeguard 20B
+------------------------------------------------------------
+Model: amazon.nova-premier-v1:0:8k
+Provider: Amazon
+Name: Nova Premier
+------------------------------------------------------------
+Model: amazon.nova-premier-v1:0:20k
+Provider: Amazon
+Name: Nova Premier
+------------------------------------------------------------
+Model: amazon.nova-premier-v1:0:1000k
+Provider: Amazon
+Name: Nova Premier
+------------------------------------------------------------
+Model: amazon.nova-premier-v1:0:mm
+Provider: Amazon
+Name: Nova Premier
+------------------------------------------------------------
+Model: amazon.nova-premier-v1:0
+Provider: Amazon
+Name: Nova Premier
+------------------------------------------------------------
+Model: amazon.nova-lite-v1:0:24k
+Provider: Amazon
+Name: Nova Lite
+------------------------------------------------------------
+Model: amazon.nova-lite-v1:0:300k
+Provider: Amazon
+Name: Nova Lite
+------------------------------------------------------------
+Model: amazon.nova-lite-v1:0
+Provider: Amazon
+Name: Nova Lite
+------------------------------------------------------------
+Model: amazon.nova-micro-v1:0:24k
+Provider: Amazon
+Name: Nova Micro
+------------------------------------------------------------
+Model: amazon.nova-micro-v1:0:128k
+Provider: Amazon
+Name: Nova Micro
+------------------------------------------------------------
+Model: amazon.nova-micro-v1:0
+Provider: Amazon
+Name: Nova Micro
+------------------------------------------------------------
+Model: amazon.nova-sonic-v1:0
+Provider: Amazon
+Name: Nova Sonic
+------------------------------------------------------------
+Model: ai21.jamba-1-5-large-v1:0
+Provider: AI21 Labs
+Name: Jamba 1.5 Large
+------------------------------------------------------------
+Model: ai21.jamba-1-5-mini-v1:0
+Provider: AI21 Labs
+Name: Jamba 1.5 Mini
+------------------------------------------------------------
+Model: anthropic.claude-3-haiku-20240307-v1:0:48k
+Provider: Anthropic
+Name: Claude 3 Haiku
+------------------------------------------------------------
+Model: anthropic.claude-3-haiku-20240307-v1:0:200k
+Provider: Anthropic
+Name: Claude 3 Haiku
+------------------------------------------------------------
+Model: anthropic.claude-3-haiku-20240307-v1:0
+Provider: Anthropic
+Name: Claude 3 Haiku
+------------------------------------------------------------
+Model: cohere.rerank-v3-5:0
+Provider: Cohere
+Name: Rerank 3.5
+------------------------------------------------------------
+Model: deepseek.r1-v1:0
+Provider: DeepSeek
+Name: DeepSeek-R1
+------------------------------------------------------------
+Model: meta.llama3-8b-instruct-v1:0
+Provider: Meta
+Name: Llama 3 8B Instruct
+------------------------------------------------------------
+Model: meta.llama3-70b-instruct-v1:0
+Provider: Meta
+Name: Llama 3 70B Instruct
+------------------------------------------------------------
+Model: meta.llama3-1-8b-instruct-v1:0
+Provider: Meta
+Name: Llama 3.1 8B Instruct
+------------------------------------------------------------
+Model: meta.llama3-1-70b-instruct-v1:0
+Provider: Meta
+Name: Llama 3.1 70B Instruct
+------------------------------------------------------------
+Model: meta.llama3-3-70b-instruct-v1:0
+Provider: Meta
+Name: Llama 3.3 70B Instruct
+------------------------------------------------------------
+Model: meta.llama4-scout-17b-instruct-v1:0
+Provider: Meta
+Name: Llama 4 Scout 17B Instruct
+------------------------------------------------------------
+Model: meta.llama4-maverick-17b-instruct-v1:0
+Provider: Meta
+Name: Llama 4 Maverick 17B Instruct
+------------------------------------------------------------
+Model: mistral.mistral-7b-instruct-v0:2
+Provider: Mistral AI
+Name: Mistral 7B Instruct
+------------------------------------------------------------
+Model: mistral.mixtral-8x7b-instruct-v0:1
+Provider: Mistral AI
+Name: Mixtral 8x7B Instruct
+------------------------------------------------------------
+Model: mistral.mistral-large-2402-v1:0
+Provider: Mistral AI
+Name: Mistral Large (24.02)
+------------------------------------------------------------
+Model: mistral.mistral-small-2402-v1:0
+Provider: Mistral AI
+Name: Mistral Small (24.02)
+------------------------------------------------------------
+Model: mistral.pixtral-large-2502-v1:0
+Provider: Mistral AI
+Name: Pixtral Large (25.02)
+------------------------------------------------------------
+
+Testing models with LangChain...
+
+======================================================================
+Testing: nvidia.nemotron-nano-12b-v2
+Streaming disabled for model 'nvidia.nemotron-nano-12b-v2': provider 'nvidia' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that enables developers to build applications powered by language models by connecting them with external data sources, APIs, and tools to enhance their capabilities and enable dynamic interactions.
+
+======================================================================
+Testing: qwen.qwen3-coder-next
+STATUS: SUCCESS
+Response: LangChain is a framework that helps developers build applications by connecting large language models (like LLMs) with external data, tools, and memory—so they can reason, retrieve information, and take actions beyond simple text generation.
+======================================================================
+Testing: openai.gpt-5.6-terra
+Streaming disabled for model 'openai.gpt-5.6-terra': provider 'openai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model openai.gpt-5.6-terra does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: openai.gpt-5.6-terra is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/    
+======================================================================
+Testing: anthropic.claude-sonnet-4-20250514-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-sonnet-4-20250514-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: anthropic.claude-haiku-4-5-20251001-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-haiku-4-5-20251001-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: moonshotai.kimi-k2.5
+STATUS: SUCCESS
+Response:  LangChain is a framework that makes it easier to build applications that combine large language models with external data sources and tools.
+======================================================================
+Testing: openai.gpt-oss-120b-1:0
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'The user asks: "Explain LangChain in one simple sentence." So we need a concise single sentence explanation. Should be simple. Provide answer.', 'signature': ''}}, {'type': 'text', 'text': 'LangChain is a framework that lets developers easily build applications that connect large language models with external data, tools, and APIs to create more powerful, context‑aware AI workflows.'}]
+======================================================================
+Testing: qwen.qwen3-next-80b-a3b
+STATUS: SUCCESS
+Response: LangChain is a framework that helps you build applications powered by large language models by connecting them to data, tools, and workflows.
+======================================================================
+Testing: anthropic.claude-fable-5
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model anthropic.claude-fable-5 does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: anthropic.claude-fable-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/
+======================================================================
+Testing: deepseek.v3.2
+STATUS: SUCCESS
+Response: LangChain is a framework that helps developers build applications powered by large language models by connecting them to external data sources and tools.
+======================================================================
+Testing: nvidia.nemotron-nano-3-30b
+Streaming disabled for model 'nvidia.nemotron-nano-3-30b': provider 'nvidia' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that simplifies building applications powered by large language models by letting you chain together prompts, models, and tools in a modular, reusable way.
+======================================================================
+Testing: anthropic.claude-sonnet-4-6
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-sonnet-4-6 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: minimax.minimax-m2
+Streaming disabled for model 'minimax.minimax-m2': provider 'minimax' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'I need to explain LangChain in one simple sentence. The user wants a concise definition, so I’ll say something like: "LangChain is a framework for building AI applications with LLMs by chaining prompts, tools, and memory." I want to keep it straightforward and avoid heavy formatting. I’ll ensure it’s clear and captures the essence of LangChain without overcomplicating things. Let’s finalize that sentence!\n', 'signature': ''}}, {'type': 'text', 'text': '\n\nLangChain is a framework for building AI applications with LLMs by chaining prompts, tools, and memory.'}]
+======================================================================
+Testing: zai.glm-4.7-flash
+Streaming disabled for model 'zai.glm-4.7-flash': provider 'zai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that helps developers build applications that can understand and use data from various sources by connecting them to large language models.
+======================================================================
+Testing: mistral.voxtral-mini-3b-2507
+STATUS: SUCCESS
+Response: LangChain is a framework for building applications powered by language models.
+======================================================================
+Testing: xai.grok-4.6
+Streaming disabled for model 'xai.grok-4.6': provider 'xai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: xai.grok-4.6 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/
+======================================================================
+Testing: amazon.nova-pro-v1:0
+STATUS: SUCCESS
+Response: LangChain is a framework for developing applications powered by language models.
+======================================================================
+Testing: amazon.nova-pro-v1:0:24k
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: The provided model doesn't support on-demand throughput.
+======================================================================
+Testing: amazon.nova-pro-v1:0:300k
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: The provided model doesn't support on-demand throughput.
+======================================================================
+Testing: amazon.nova-2-lite-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID amazon.nova-2-lite-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: amazon.nova-2-lite-v1:0:256k
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: The provided model doesn't support on-demand throughput.
+======================================================================
+Testing: minimax.minimax-m2.5
+Streaming disabled for model 'minimax.minimax-m2.5': provider 'minimax' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'The user asks: "Explain LangChain in one simple sentence."\n\nWe need to comply. It\'s a straightforward request. There\'s no disallowed content. We can answer.\n\nWe need to give a simple one-sentence explanation of LangChain. Possibly: "LangChain is a framework for building applications powered by large language models by linking together components like models, prompts, memory, and external data sources." That\'s a simple sentence.\n\nWe must ensure it\'s one sentence. So we can produce: "LangChain is a framework that simplifies building applications with large language models by connecting prompts, models, memory, and external data sources in a modular, chain-like way."\n\nThat\'s one sentence. That should satisfy.\n\nWe must not add extra content beyond that. The user asked for one simple sentence. So we can answer with one sentence.\n\nThus final answer: "LangChain is a framework that simplifies building applications with large language models by connecting prompts, models, memory, and external data sources in a modular, chain-like way."\n\nThat\'s one sentence. Good.\n', 'signature': ''}}, {'type': 'text', 'text': '\n\nLangChain is a framework that simplifies building applications with large language models by connecting prompts, models, memory, and external data sources in a modular, chain‑like way.'}]
+======================================================================
+Testing: google.gemma-3-12b-it
+Streaming disabled for model 'google.gemma-3-12b-it': provider 'google' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that simplifies building applications powered by large language models (LLMs) by connecting them to various data sources and tools.
+
+
+
+
+======================================================================
+Testing: moonshot.kimi-k2-thinking
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': ' The user wants a simple one-sentence explanation of LangChain. I need to distill the essence of what LangChain is and does.\n\nLangChain is a framework for developing applications powered by language models. It helps connect LLMs to external data sources, tools, and APIs, making it easier to build complex AI applications.\n\nLet me think of the simplest way to phrase this:\n\n- "LangChain is a framework for building AI applications with language models."\n- "LangChain is a toolkit that connects language models to external data and tools."\n- "LangChain helps developers build applications that use language models with external data and APIs."\n\nI need to make it as simple as possible while capturing the core idea. The key aspects are:\n1. It\'s a framework/toolkit\n2. For building applications\n3. Using language models (LLMs)\n4. Connecting them to external resources\n\nA good simple sentence would be: "LangChain is a framework for building applications that connect language models to external data sources and tools."\n\nOr even simpler: "LangChain is a toolkit for building AI applications that use language models with external data and APIs."\n\nLet me try to make it even more concise and clear: "LangChain is a framework that helps developers build applications powered by language models connected to external data and tools."\n\nI think the best simple sentence is: "LangChain is a framework for building applications that connect language models to external data sources and tools."\n\nWait, let me check if I can make it even simpler. The core value proposition is connecting LLMs to stuff.\n\n"LangChain is a framework for building AI applications by connecting language models to external data and tools."\n\nThat\'s pretty good. Let me see if I can remove any jargon or make it more accessible.\n\n"LangChain is a toolkit that helps you build AI applications using language models with your own data and tools."\n\nThat\'s simpler and more direct. But "toolkit" vs "framework" - framework is more accurate but toolkit might be simpler. Let me stick with framework as it\'s the official term.\n\nFinal candidate: "LangChain is a framework for building AI applications that connect language models to external data sources and tools."\n\nActually, I can make it even more concise: "LangChain is a framework for building applications powered by language models connected to external data and tools."\n\nOr: "LangChain is a framework that connects language models to external data and tools for building AI applications."\n\nLet me think about what a non-technical person would understand best. The key is "connecting language models to stuff', 'signature': ''}}]
+======================================================================
+Testing: mistral.mistral-large-3-675b-instruct
+STATUS: SUCCESS
+Response: **LangChain is a framework that helps developers build AI-powered applications by chaining together large language models (LLMs) with tools, data, and workflows.**
+======================================================================
+Testing: twelvelabs.pegasus-1-2-v1:0
+Streaming disabled for model 'twelvelabs.pegasus-1-2-v1:0': provider 'twelvelabs' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: This action doesn't support the model that you provided. Try again with a supported text or chat model.
+======================================================================
+Testing: amazon.nova-2-sonic-v1:0
+Streaming disabled for model 'amazon.nova-2-sonic-v1:0': provider 'amazon' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: This action doesn't support the model that you provided. Try again with a supported text or chat model.
+======================================================================
+Testing: mistral.devstral-2-123b
+STATUS: SUCCESS
+Response: LangChain is an open-source framework that simplifies building applications with large language models (LLMs) by providing tools for chaining prompts, managing memory, and integrating external data sources.
+======================================================================
+Testing: minimax.minimax-m2.1
+Streaming disabled for model 'minimax.minimax-m2.1': provider 'minimax' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'The user is asking for a simple explanation of LangChain in one sentence. This is a straightforward request that requires a concise, clear explanation. I should provide a simple, accessible definition that captures what LangChain is without being too technical.\n', 'signature': ''}}, {'type': 'text', 'text': '\n\nLangChain is a framework for building applications powered by large language models (LLMs), making it easier to connect AI models with data sources, tools, and workflows.'}]
+======================================================================
+Testing: nvidia.nemotron-super-3-120b
+Streaming disabled for model 'nvidia.nemotron-super-3-120b': provider 'nvidia' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that simplifies building applications powered by large language models by enabling easy integration of prompts, data sources, and tools to create context-aware, reasoning-driven AI systems.
+======================================================================
+Testing: qwen.qwen3-32b-v1:0
+STATUS: SUCCESS
+Response: LangChain is a framework that helps you build applications with large language models by connecting them to data, tools, and other systems in a flexible and efficient way.
+======================================================================
+Testing: mistral.ministral-3-14b-instruct
+STATUS: SUCCESS
+Response: **LangChain is a framework that connects large language models (LLMs) with external tools, data, and applications to build smarter, context-aware AI systems.**
+======================================================================
+Testing: anthropic.claude-opus-4-6-v1
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-opus-4-6-v1 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: writer.palmyra-x5-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID writer.palmyra-x5-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: nvidia.nemotron-nano-9b-v2
+Streaming disabled for model 'nvidia.nemotron-nano-9b-v2': provider 'nvidia' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: Okay, the user wants me to explain LangChain in one simple sentence. Let me start by recalling what LangChain is. From what I remember, LangChain is a framework that helps in building applications using large language models. It probably connects different components like models, data sources, and tools.
+
+The key points to include are that it's a framework, it's for building apps with LLMs, and it integrates various elements. I need to make sure the sentence is concise but covers these aspects. Maybe something like: "LangChain is a framework that simplifies building applications with large language models by connecting them to data sources, tools, and other components." That should cover the main idea without getting too technical. Let me check if that's accurate. Yes, LangChain does focus on integrating models with external data and tools, so that sentence captures the essence.
+</think>
+
+LangChain is a framework that simplifies building applications with large language models by connecting them to data sources, tools, and other components.
+
+======================================================================
+Testing: mistral.ministral-3-8b-instruct
+STATUS: SUCCESS
+Response: **LangChain is a framework that connects large language models (LLMs) with tools, data, and APIs to build customizable, modular AI applications.**
+======================================================================
+Testing: mistral.voxtral-small-24b-2507
+STATUS: SUCCESS
+Response: LangChain is a framework for developing applications that use language models, making it easier to build and manage complex AI-driven language tasks.
+======================================================================
+Testing: zai.glm-5
+Streaming disabled for model 'zai.glm-5': provider 'zai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is an open-source framework that helps developers build applications powered by large language models by connecting those models to external data sources and tools.
+======================================================================
+Testing: openai.gpt-oss-20b-1:0
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'We need to explain LangChain in one simple sentence. So something like: "LangChain is a framework that helps developers build applications using large language models by providing reusable components for data ingestion, prompt management, and integration with external tools." That\'s a simple sentence. Probably keep it short. Let\'s produce.', 'signature': ''}}, {'type': 'text', 'text': 'LangChain is a developer toolkit that lets you build applications around large language models by providing reusable components for data handling, prompt design, and integration with external services.'}]
+======================================================================
+Testing: anthropic.claude-opus-5
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model anthropic.claude-opus-5 does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: anthropic.claude-opus-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/ 
+======================================================================
+Testing: google.gemma-3-4b-it
+Streaming disabled for model 'google.gemma-3-4b-it': provider 'google' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that makes it easier to build applications powered by large language models (LLMs) by providing tools for connecting them to data sources and other components.
+======================================================================
+Testing: anthropic.claude-opus-4-8
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model anthropic.claude-opus-4-8 does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: anthropic.claude-opus-4-8 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/
+======================================================================
+Testing: anthropic.claude-opus-4-7
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model anthropic.claude-opus-4-7 does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: anthropic.claude-opus-4-7 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/
+======================================================================
+Testing: openai.gpt-oss-safeguard-120b
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'The user asks: "Explain LangChain in one simple sentence." So answer with a concise sentence explaining LangChain. Should be simple. Provide one sentence. Possibly "LangChain is a framework for building applications that combine large language models with external data sources and tools." Provide one sentence. Ensure clarity.', 'signature': ''}}, {'type': 'text', 'text': 'LangChain is a framework that lets developers easily build applications that combine large language models with external data, APIs, and tools to create powerful, context‑aware AI workflows.'}]
+======================================================================
+Testing: google.gemma-3-27b-it
+Streaming disabled for model 'google.gemma-3-27b-it': provider 'google' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework for developing applications powered by large language models (LLMs), making it easier to connect LLMs to other sources of data and have them interact with their environment.
+
+
+
+
+======================================================================
+Testing: writer.palmyra-x4-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID writer.palmyra-x4-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: anthropic.claude-sonnet-4-5-20250929-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-sonnet-4-5-20250929-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: qwen.qwen3-vl-235b-a22b
+STATUS: SUCCESS
+Response: LangChain is a framework that helps developers build applications powered by large language models by connecting them with external data, tools, and workflows.
+======================================================================
+Testing: zai.glm-4.7
+Streaming disabled for model 'zai.glm-4.7': provider 'zai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: SUCCESS
+Response: LangChain is a framework that makes it easy to build applications by connecting large language models to external data sources and tools.
+======================================================================
+Testing: writer.palmyra-vision-7b
+STATUS: SUCCESS
+Response:  LangChain is a Python library for building and composing large language models, allowing developers to easily create custom NLP applications using various models and components.
+======================================================================
+Testing: openai.gpt-5.6-luna
+Streaming disabled for model 'openai.gpt-5.6-luna': provider 'openai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model openai.gpt-5.6-luna does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: openai.gpt-5.6-luna is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/     
+======================================================================
+Testing: anthropic.claude-sonnet-5
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model anthropic.claude-sonnet-5 does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: anthropic.claude-sonnet-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/
+======================================================================
+Testing: anthropic.claude-opus-4-1-20250805-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-opus-4-1-20250805-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: mistral.magistral-small-2509
+STATUS: SUCCESS
+Response: LangChain is a framework that helps developers build applications that combine language models with other tools and data to create more powerful AI systems.
+======================================================================
+Testing: openai.gpt-5.6-sol
+Streaming disabled for model 'openai.gpt-5.6-sol': provider 'openai' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+C:\Users\PiyushChunara\Desktop\projects\Dynamic-Agent-Orchestration\venv\lib\site-packages\langchain_aws\chat_models\bedrock_converse.py:1350: UserWarning: Model openai.gpt-5.6-sol does not support temperature; ignoring the provided value.
+  params = self._converse_params(
+STATUS: FAILED
+TYPE: IAM / MODEL ACCESS
+ERROR: An error occurred (AccessDeniedException) when calling the Converse operation: openai.gpt-5.6-sol is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/      
+======================================================================
+Testing: mistral.ministral-3-3b-instruct
+STATUS: SUCCESS
+Response: LangChain is a framework that helps build **AI-powered applications** by connecting tools, memory, and models to create smart workflows for tasks like chatbots, question answering, and automation.
+======================================================================
+Testing: anthropic.claude-opus-4-5-20251101-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID anthropic.claude-opus-4-5-20251101-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: qwen.qwen3-coder-30b-a3b-v1:0
+STATUS: SUCCESS
+Response: LangChain is a framework that makes it easy to build applications by connecting large language models with other tools and data sources.
+======================================================================
+Testing: openai.gpt-oss-safeguard-20b
+STATUS: SUCCESS
+Response: [{'type': 'reasoning_content', 'reasoning_content': {'text': 'We need to explain LangChain in one simple sentence. The user asks: "Explain LangChain in one simple sentence." So we need a concise sentence. LangChain is a framework for building applications with LLMs, enabling chaining of language model calls, prompts, memory, etc. So one sentence: "LangChain is a Python library that lets developers build applications by chaining together language model calls, prompts, and tools to create more complex AI workflows." That is simple. Let\'s produce.', 'signature': ''}}, {'type': 'text', 'text': 'LangChain is a Python framework that lets developers build AI applications by chaining together language‑model calls, prompts, and tools into reusable, composable workflows.'}]
+======================================================================
+Testing: amazon.nova-premier-v1:0:8k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-premier-v1:0:20k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-premier-v1:0:1000k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-premier-v1:0:mm
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-premier-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID amazon.nova-premier-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: amazon.nova-lite-v1:0:24k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-lite-v1:0:300k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-lite-v1:0
+STATUS: SUCCESS
+Response: LangChain is a framework designed to simplify the development of applications using large language models.
+======================================================================
+Testing: amazon.nova-micro-v1:0:24k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-micro-v1:0:128k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: amazon.nova-micro-v1:0
+STATUS: SUCCESS
+Response: LangChain is a framework for building applications that process and generate text using large language models.
+======================================================================
+Testing: amazon.nova-sonic-v1:0
+Streaming disabled for model 'amazon.nova-sonic-v1:0': provider 'amazon' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: This action doesn't support the model that you provided. Try again with a supported text or chat model.
+======================================================================
+Testing: ai21.jamba-1-5-large-v1:0
+STATUS: FAILED
+TYPE: OTHER ERROR
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Access denied. This Model is marked by provider as Legacy and you have not been actively using the model in the last 30 days. Please upgrade to an active model on Amazon Bedrock
+======================================================================
+Testing: ai21.jamba-1-5-mini-v1:0
+STATUS: FAILED
+TYPE: OTHER ERROR
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Access denied. This Model is marked by provider as Legacy and you have not been actively using the model in the last 30 days. Please upgrade to an active model on Amazon Bedrock
+======================================================================
+Testing: anthropic.claude-3-haiku-20240307-v1:0:48k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: anthropic.claude-3-haiku-20240307-v1:0:200k
+STATUS: FAILED
+TYPE: MODEL NOT AVAILABLE
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Model not found.
+======================================================================
+Testing: anthropic.claude-3-haiku-20240307-v1:0
+STATUS: FAILED
+TYPE: OTHER ERROR
+ERROR: An error occurred (ResourceNotFoundException) when calling the Converse operation: Access denied. This Model is marked by provider as Legacy and you have not been actively using the model in the last 30 days. Please upgrade to an active model on Amazon Bedrock
+======================================================================
+Testing: cohere.rerank-v3-5:0
+Streaming disabled for model 'cohere.rerank-v3-5:0': provider 'cohere' is not verified as streaming-capable with ChatBedrockConverse, so calls will fall back to the non-streaming Converse API. If this model does support streaming, pass disable_streaming=False to override.
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: This action doesn't support the model that you provided. Try again with a supported text or chat model.
+======================================================================
+Testing: deepseek.r1-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID deepseek.r1-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: meta.llama3-8b-instruct-v1:0
+STATUS: SUCCESS
+Response: 
+
+LangChain is a large-scale language model that uses a combination of transformer-based architectures and a novel training method to generate coherent and informative text on a wide range of topics.
+======================================================================
+Testing: meta.llama3-70b-instruct-v1:0
+STATUS: SUCCESS
+Response: 
+
+LangChain is an open-source framework that enables developers to build and deploy AI-powered applications by chaining together multiple language models and other AI components to perform complex tasks.
+======================================================================
+Testing: meta.llama3-1-8b-instruct-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID meta.llama3-1-8b-instruct-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: meta.llama3-1-70b-instruct-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID meta.llama3-1-70b-instruct-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: meta.llama3-3-70b-instruct-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID meta.llama3-3-70b-instruct-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: meta.llama4-scout-17b-instruct-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID meta.llama4-scout-17b-instruct-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: meta.llama4-maverick-17b-instruct-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID meta.llama4-maverick-17b-instruct-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+======================================================================
+Testing: mistral.mistral-7b-instruct-v0:2
+STATUS: SUCCESS
+Response:  LangChain is a language model that generates human-like responses and translations in real-time using artificial intelligence.
+======================================================================
+Testing: mistral.mixtral-8x7b-instruct-v0:1
+STATUS: SUCCESS
+Response:  LangChain is a blockchain-based platform that aims to provide decentralized language processing and translation services.
+======================================================================
+Testing: mistral.mistral-large-2402-v1:0
+STATUS: SUCCESS
+Response: LangChain is a platform that utilizes artificial intelligence to facilitate language learning and translation, making communication across different languages more accessible and efficient.
+======================================================================
+Testing: mistral.mistral-small-2402-v1:0
+STATUS: SUCCESS
+Response: LangChain is a hypothetical concept that refers to a connected network of language models working together to process and generate human-like text.
+======================================================================
+Testing: mistral.pixtral-large-2502-v1:0
+STATUS: FAILED
+TYPE: MODEL / REQUEST VALIDATION
+ERROR: An error occurred (ValidationException) when calling the Converse operation: Invocation of model ID mistral.pixtral-large-2502-v1:0 with on-demand throughput isn’t supported. Retry your request with the ID or ARN of an inference profile that contains this model.
+
+
+======================================================================
+FINAL SUMMARY
+======================================================================
+
+Working models:
+
+  [OK] nvidia.nemotron-nano-12b-v2
+  [OK] qwen.qwen3-coder-next
+  [OK] moonshotai.kimi-k2.5
+  [OK] openai.gpt-oss-120b-1:0
+  [OK] qwen.qwen3-next-80b-a3b
+  [OK] deepseek.v3.2
+  [OK] nvidia.nemotron-nano-3-30b
+  [OK] minimax.minimax-m2
+  [OK] zai.glm-4.7-flash
+  [OK] mistral.voxtral-mini-3b-2507
+  [OK] amazon.nova-pro-v1:0
+  [OK] minimax.minimax-m2.5
+  [OK] google.gemma-3-12b-it
+  [OK] moonshot.kimi-k2-thinking
+  [OK] mistral.mistral-large-3-675b-instruct
+  [OK] mistral.devstral-2-123b
+  [OK] minimax.minimax-m2.1
+  [OK] nvidia.nemotron-super-3-120b
+  [OK] qwen.qwen3-32b-v1:0
+  [OK] mistral.ministral-3-14b-instruct
+  [OK] nvidia.nemotron-nano-9b-v2
+  [OK] mistral.ministral-3-8b-instruct
+  [OK] mistral.voxtral-small-24b-2507
+  [OK] zai.glm-5
+  [OK] openai.gpt-oss-20b-1:0
+  [OK] google.gemma-3-4b-it
+  [OK] openai.gpt-oss-safeguard-120b
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] mistral.ministral-3-3b-instruct
+  [OK] qwen.qwen3-coder-30b-a3b-v1:0
+  [OK] openai.gpt-oss-safeguard-20b
+  [OK] amazon.nova-lite-v1:0
+  [OK] amazon.nova-micro-v1:0
+  [OK] meta.llama3-8b-instruct-v1:0
+  [OK] meta.llama3-70b-instruct-v1:0
+  [OK] mistral.mistral-7b-instruct-v0:2
+  [OK] mistral.mixtral-8x7b-instruct-v0:1
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] mistral.ministral-3-3b-instruct
+  [OK] qwen.qwen3-coder-30b-a3b-v1:0
+  [OK] openai.gpt-oss-safeguard-20b
+  [OK] amazon.nova-lite-v1:0
+  [OK] amazon.nova-micro-v1:0
+  [OK] meta.llama3-8b-instruct-v1:0
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] mistral.ministral-3-3b-instruct
+  [OK] qwen.qwen3-coder-30b-a3b-v1:0
+  [OK] openai.gpt-oss-safeguard-20b
+  [OK] amazon.nova-lite-v1:0
+  [OK] amazon.nova-micro-v1:0
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] mistral.ministral-3-3b-instruct
+  [OK] qwen.qwen3-coder-30b-a3b-v1:0
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] google.gemma-3-27b-it
+  [OK] google.gemma-3-27b-it
+  [OK] qwen.qwen3-vl-235b-a22b
+  [OK] zai.glm-4.7
+  [OK] writer.palmyra-vision-7b
+  [OK] mistral.magistral-small-2509
+  [OK] mistral.ministral-3-3b-instruct
+  [OK] qwen.qwen3-coder-30b-a3b-v1:0
+  [OK] openai.gpt-oss-safeguard-20b
+  [OK] amazon.nova-lite-v1:0
+  [OK] amazon.nova-micro-v1:0
+  [OK] meta.llama3-8b-instruct-v1:0
+  [OK] meta.llama3-70b-instruct-v1:0
+  [OK] mistral.mistral-7b-instruct-v0:2
+  [OK] mistral.mixtral-8x7b-instruct-v0:1
+  [OK] mistral.mistral-large-2402-v1:0
+  [OK] mistral.mistral-small-2402-v1:0
+
+Models tested: 90
+Models working: 43

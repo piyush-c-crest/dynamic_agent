@@ -53,34 +53,104 @@ except ImportError:
 
 load_dotenv()
 
-# ---------- terminal output -> file logging ----------
-class _Tee:
-    """Mirrors every write to both the original stream and a log file.
+# ---------- structured terminal + file logging ----------
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-    Wrapping sys.stdout/sys.stderr this way captures ALL console output —
-    including every existing print() call throughout this module — without
-    needing to touch each call site individually.
+
+class _Ansi:
+    """ANSI styles used for human-readable terminal logs.
+
+    The log file always has these styles removed, so it remains easy to grep,
+    copy into an issue, or parse with a log collector.
     """
-    def __init__(self, *streams):
-        self.streams = streams
+
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+
+
+_LOG_TAG_COLORS = {
+    "SYSTEM": _Ansi.CYAN,
+    "WORKFLOW": _Ansi.BLUE,
+    "AI-REQUEST": _Ansi.MAGENTA,
+    "AI-REPLY": _Ansi.CYAN,
+    "TOOL-CALL": _Ansi.YELLOW,
+    "TOOL-RESULT": _Ansi.GREEN,
+    "TOOL-CREATION": _Ansi.MAGENTA,
+    "REGISTRY": _Ansi.CYAN,
+    "SANDBOX": _Ansi.BLUE,
+    "AGENT": _Ansi.BLUE,
+    "FILESYSTEM": _Ansi.CYAN,
+    "TOKEN-USAGE": _Ansi.YELLOW,
+    "FINAL-RESPONSE": _Ansi.GREEN,
+    "WARNING": _Ansi.YELLOW,
+    "ERROR": _Ansi.RED,
+}
+
+
+def _use_color() -> bool:
+    """Enable colors for interactive terminals; override with LOG_COLOR.
+
+    Set LOG_COLOR=always to force colors or LOG_COLOR=never (or NO_COLOR) to
+    disable them. The file mirror is always plain text regardless.
+    """
+    setting = os.environ.get("LOG_COLOR", "auto").lower()
+    if os.environ.get("NO_COLOR") is not None or setting == "never":
+        return False
+    if setting == "always":
+        return True
+    return bool(getattr(sys.__stdout__, "isatty", lambda: False)())
+
+
+def _paint(text: str, color: str = "", *, bold: bool = False, dim: bool = False) -> str:
+    if not _use_color() or not color:
+        return text
+    prefix = color
+    if bold:
+        prefix += _Ansi.BOLD
+    if dim:
+        prefix += _Ansi.DIM
+    return f"{prefix}{text}{_Ansi.RESET}"
+
+
+class _Tee:
+    """Mirrors terminal output to a plain-text log file.
+
+    ANSI escapes stay in the terminal but are stripped before writing to the
+    file. This preserves colored debugging locally without corrupting saved
+    logs with escape codes.
+    """
+    def __init__(self, console_stream, log_stream):
+        self.console_stream = console_stream
+        self.log_stream = log_stream
 
     def write(self, data):
-        for s in self.streams:
-            try:
-                s.write(data)
-                s.flush()
-            except Exception:
-                pass  # never let a logging failure break the app
+        try:
+            self.console_stream.write(data)
+            self.console_stream.flush()
+        except Exception:
+            pass  # never let a logging failure break the app
+        try:
+            self.log_stream.write(_ANSI_ESCAPE_RE.sub("", data))
+            self.log_stream.flush()
+        except Exception:
+            pass
 
     def flush(self):
-        for s in self.streams:
+        for stream in (self.console_stream, self.log_stream):
             try:
-                s.flush()
+                stream.flush()
             except Exception:
                 pass
 
     def isatty(self):
-        return any(getattr(s, "isatty", lambda: False)() for s in self.streams)
+        return bool(getattr(self.console_stream, "isatty", lambda: False)())
 
 
 def _setup_console_logging(log_dir: str = "logs") -> str:
@@ -94,16 +164,38 @@ def _setup_console_logging(log_dir: str = "logs") -> str:
 
 
 LOG_FILE_PATH = _setup_console_logging()
-print(f"🗒️ Logging console output to: {LOG_FILE_PATH}")
 
 
-def _log(tag: str, msg: str = "") -> None:
-    """Single-line, timestamped log entry. `tag` identifies which part of the
-    workflow this line is about (WORKFLOW / AI-REQUEST / AI-REPLY / TOOL-CALL /
-    TOOL-RESULT / FINAL-RESPONSE / ...) so the console/log file can be scanned
-    or grepped for just one stage of a run."""
+def _format_log_value(value: Any, max_chars: int = 300) -> str:
+    """Render an inline field predictably without letting it flood a log line."""
+    if isinstance(value, str):
+        rendered = value
+    else:
+        try:
+            rendered = json.dumps(value, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            rendered = str(value)
+    rendered = re.sub(r"\s+", " ", rendered).strip()
+    if len(rendered) > max_chars:
+        rendered = f"{rendered[:max_chars - 1]}…"
+    return repr(rendered) if isinstance(value, str) else rendered
+
+
+def _log(tag: str, msg: str = "", **fields: Any) -> None:
+    """Write one colored, structured event to the console and plain log file.
+
+    Example: ``[12:34:56.789] [TOOL-CALL] invoke | tool="search" task="T1"``.
+    Keep values in ``fields`` rather than interpolating them into ``msg`` so
+    important context can be scanned consistently across the entire run.
+    """
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    print(f"[{ts}] [{tag}] {msg}")
+    tag_text = f"[{tag:<14}]"
+    colored_tag = _paint(tag_text, _LOG_TAG_COLORS.get(tag, _Ansi.CYAN), bold=True)
+    context = (
+        " | " + " ".join(f"{key}={_format_log_value(value)}" for key, value in fields.items())
+        if fields else ""
+    )
+    print(f"{_paint(f'[{ts}]', _Ansi.DIM)} {colored_tag} {msg}{_paint(context, _Ansi.DIM)}")
 
 
 def _log_block(tag: str, title: str, body: str, max_chars: int = 2000) -> None:
@@ -113,9 +205,13 @@ def _log_block(tag: str, title: str, body: str, max_chars: int = 2000) -> None:
     body = body if body is not None else ""
     truncated = len(body) > max_chars
     shown = body[:max_chars] + (f"\n... [truncated, {len(body) - max_chars} more chars]" if truncated else "")
-    _log(tag, f"{title}:")
+    _log(tag, f"BEGIN {title}", chars=len(body), truncated=truncated)
     for line in shown.splitlines() or [""]:
-        print(f"    {line}")
+        print(_paint(f"    │ {line}", _Ansi.DIM))
+    _log(tag, f"END {title}")
+
+
+_log("SYSTEM", "Structured logging initialized", log_file=LOG_FILE_PATH, color_mode=os.environ.get("LOG_COLOR", "auto"))
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
@@ -123,7 +219,7 @@ os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
 # Requires LANGCHAIN_API_KEY in .env
 
 if not os.environ.get("LANGCHAIN_API_KEY"):
-    print("⚠️ LANGCHAIN_API_KEY not set — LangSmith tracing will not appear in the dashboard.")
+    _log("WARNING", "LANGCHAIN_API_KEY is not set; LangSmith tracing is disabled")
 
 MAX_RETRIES = 2
 MAX_TASKS = 6
@@ -410,12 +506,12 @@ class ToolSandboxExecutor:
     def ensure_env(self, tool_name: str, requirements: list[str] | None = None):
         """Create the shared venv on first use, then install only the packages not already present."""
         if not os.path.exists(self._venv_dir):
-            print("🐍 Creating shared tool venv (first dynamic tool)...")
+            _log("SANDBOX", "Creating shared tool virtual environment", tool=tool_name, path=self._venv_dir)
             venv.EnvBuilder(with_pip=True, clear=True).create(self._venv_dir)
 
         missing = [r for r in (requirements or []) if r.lower() not in self._installed]
         if missing:
-            print(f"📦 Installing {missing} (needed by '{tool_name}') into shared venv...")
+            _log("SANDBOX", "Installing tool dependencies", tool=tool_name, packages=missing)
             proc = subprocess.run(
                 [self._venv_python(), "-m", "pip", "install", "-q",
                  "--disable-pip-version-check", *missing],
@@ -428,7 +524,7 @@ class ToolSandboxExecutor:
             self._installed.update(r.lower() for r in missing)
             self._save_installed_cache()
         elif requirements:
-            print(f"📦 All requirements for '{tool_name}' already present in shared venv, skipping install.")
+            _log("SANDBOX", "Dependencies already available; install skipped", tool=tool_name, packages=requirements)
 
     def save_tool_module(self, tool_name: str, code: str) -> str:
         """Persist the generated (import-allowed) source into the shared tools folder."""
@@ -610,8 +706,8 @@ class DynamicToolRegistry:
                 with open(os.path.join(tools_dir, f"{name}.py"), "w", encoding="utf-8") as f:
                     f.write(f"# Auto-generated tool: {name}\n# Created: {datetime.now().isoformat()}\n\n{code}")
             except OSError as e:
-                print(f"⚠️ Could not persist source for tool '{name}' to disk: {e}")
-        print(f"✅ Tool registered: {name}")
+                _log("WARNING", "Could not persist generated tool source", tool=name, error=str(e))
+        _log("REGISTRY", "Tool registered", tool=name, source="generated" if code else "built-in", total_tools=len(self.tools))
 
     def get_all_tools(self) -> list[BaseTool]:
         """Get all registered tools as a list"""
@@ -645,10 +741,10 @@ class DynamicToolRegistry:
         future creation for the same tool_name starts clean.
         """
         if name not in self.tools:
-            print(f"⚠️ Tool '{name}' not found in registry, nothing to remove.")
+            _log("WARNING", "Tool removal skipped; tool is not registered", tool=name)
             return False
         if name in self._DEFAULT_TOOL_NAMES:
-            print(f"⚠️ Refusing to remove built-in tool '{name}'.")
+            _log("WARNING", "Tool removal refused; tool is built-in", tool=name)
             return False
 
         del self.tools[name]
@@ -664,7 +760,7 @@ class DynamicToolRegistry:
             if os.path.exists(module_path):
                 os.remove(module_path)
 
-        print(f"🗑️ Tool '{name}' removed from registry.")
+        _log("REGISTRY", "Tool removed", tool=name, remaining_tools=len(self.tools))
         return True
 
     @staticmethod
@@ -1062,7 +1158,7 @@ class DynamicToolRegistry:
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
         """Create a new tool from a natural language prompt, run in an isolated venv + subprocess sandbox."""
-        print(f"🔨 Creating tool '{tool_name}' from prompt...")
+        _log("TOOL-CREATION", "Generating dynamic tool", tool=tool_name, requirement=prompt)
 
         creation_prompt = f"""
         Create a Python tool for the following requirement:
@@ -1101,6 +1197,7 @@ class DynamicToolRegistry:
            number, boolean, array, object.
         """
 
+        _log_block("AI-REQUEST", f"Tool-generation prompt for '{tool_name}'", creation_prompt)
         response = llm.invoke(
             creation_prompt,
             config={
@@ -1111,7 +1208,7 @@ class DynamicToolRegistry:
         )
         _record_token_usage(f"tool_codegen:{tool_name}", response, ["tool_creation"])
         current_spec_text = response.content
-        print(f"📝 Generated spec for tool '{tool_name}':\n{current_spec_text}")
+        _log_block("AI-REPLY", f"Generated specification for tool '{tool_name}'", _as_text(current_spec_text))
 
         last_error = None
 
@@ -1139,12 +1236,12 @@ class DynamicToolRegistry:
                     raise RuntimeError(f"Smoke test failed: {smoke_message}")
 
                 self.register_tool(tool_name, created_tool, cleaned_code)
-                print(f"✅ Tool '{tool_name}' created and passed smoke test.")
+                _log("TOOL-CREATION", "Dynamic tool created and smoke-tested", tool=tool_name, attempt=attempt + 1)
                 return created_tool
 
             except Exception as e:
                 last_error = str(e)
-                print(f"⚠️ Tool '{tool_name}' generation attempt {attempt + 1} failed: {last_error}")
+                _log("WARNING", "Dynamic tool generation attempt failed", tool=tool_name, attempt=attempt + 1, error=last_error)
 
                 if attempt >= MAX_TOOL_VALIDATION_RETRIES:
                     break
@@ -1165,6 +1262,7 @@ class DynamicToolRegistry:
                     statements for third-party packages, but not os,
                     subprocess, eval, or exec.
                 """
+                _log_block("AI-REQUEST", f"Tool-repair prompt for '{tool_name}'", repair_prompt)
                 response = llm.invoke(
                     repair_prompt,
                     config={
@@ -1176,7 +1274,7 @@ class DynamicToolRegistry:
                 _record_token_usage(f"tool_codegen_repair:{tool_name}", response, ["tool_creation", "repair"])
                 current_spec_text = response.content
 
-        print(f"❌ Error creating tool '{tool_name}': {last_error}")
+        _log("ERROR", "Dynamic tool creation failed", tool=tool_name, error=last_error)
         raise RuntimeError(
             f"Failed to create a working tool '{tool_name}' after "
             f"{MAX_TOOL_VALIDATION_RETRIES + 1} attempt(s). Last error: {last_error}"
@@ -1281,11 +1379,11 @@ class DynamicAgentFactory:
                 created.append(name)
                 continue
             try:
-                print(f"⚡ Auto-creating missing tool '{name}' from agent workflow...")
+                _log("TOOL-CREATION", "Auto-creating missing capability", tool=name, requirement=prompt)
                 self.tool_registry.create_tool_from_prompt(prompt, name)
                 created.append(name)
             except Exception as e:
-                print(f"❌ Auto tool creation failed for '{name}': {e}")
+                _log("ERROR", "Auto-creation of missing capability failed", tool=name, error=str(e))
         return created
 
     @traceable(name="refresh_agent_tools", run_type="chain")
@@ -1316,6 +1414,7 @@ Rules:
   an empty list if the available tools are sufficient.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
+        _log("AI-REQUEST", "Refreshing agent tool selection", role=role, current_tools=agent_conf["tool_names"])
         response = llm.invoke(
             selection_prompt,
             config={
@@ -1325,9 +1424,10 @@ Rules:
             },
         )
         _record_token_usage(f"tool_refresh:{role}", response, ["tool_refresh"])
+        _log_block("AI-REPLY", f"Tool-refresh reply for role '{role}'", _as_text(response.content))
         result = parse_json_safely(response.content, default=None)
         if result is None:
-            print(f"⚠️ Tool refresh JSON parse failed for role '{role}'; keeping existing tools.")
+            _log("WARNING", "Tool-refresh reply was not valid JSON; keeping current tools", role=role)
             return agent_conf
 
         created_tool_names = self._create_missing_tools(result.get("new_tools", []))
@@ -1347,7 +1447,7 @@ Rules:
         ]
         agent_conf["llm"] = llm.bind_tools(selected_tools) if selected_tools else llm
         agent_conf["tool_names"] = [t.name for t in selected_tools]
-        print(f"🔄 Agent '{role}' tools refreshed: {agent_conf['tool_names']}")
+        _log("AGENT", "Agent tool set refreshed", role=role, tools=agent_conf["tool_names"])
         return agent_conf
 
     def tool_directive(self, tool_names: list[str]) -> str:
@@ -1366,7 +1466,7 @@ Rules:
 
     @traceable(name="create_agent", run_type="chain")
     def create_agent(self, role: str, task_description: str) -> dict:
-        _log("WORKFLOW", f"🧬 Creating new agent for role: '{role}'")
+        _log("AGENT", "Creating specialized agent", role=role, task=task_description)
         available_tools = self.tool_registry.list_tools()
 
         selection_prompt = f"""
@@ -1391,7 +1491,7 @@ Rules:
   Leave it as an empty list if the available tools are sufficient.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
-        _log("AI-REQUEST", f"Invoking agent-creation LLM for role '{role}'")
+        _log("AI-REQUEST", "Selecting tools and instructions for new agent", role=role)
         response = llm.invoke(
             selection_prompt,
             config={
@@ -1404,7 +1504,7 @@ Rules:
         _log_block("AI-REPLY", f"Agent-creation reply for role '{role}'", _as_text(response.content))
         config = parse_json_safely(response.content, default=None)
         if config is None:
-            _log("AI-REPLY", f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
+            _log("WARNING", "Agent configuration reply was not valid JSON; using fallback configuration", role=role, raw_reply=_as_text(response.content)[:300])
             config = {
                 "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
                 "tools": [],
@@ -1429,7 +1529,7 @@ Rules:
             "llm": agent_llm,
         }
         self.agents[role] = agent_conf
-        _log("WORKFLOW", f"✅ Agent '{role}' created with tools: {agent_conf['tool_names']}")
+        _log("AGENT", "Specialized agent ready", role=role, tools=agent_conf["tool_names"])
         return agent_conf
 
     def list_agents(self) -> dict:
@@ -1452,7 +1552,7 @@ Rules:
             ]
             remaining_tools = [t for t in remaining_tools if t is not None]
             conf["llm"] = llm.bind_tools(remaining_tools) if remaining_tools else llm
-            print(f"🔄 Agent '{role}' tools after removing '{tool_name}': {conf['tool_names']}")
+            _log("AGENT", "Removed tool from agent", role=role, removed_tool=tool_name, tools=conf["tool_names"])
 
 
 class DynamicAgentManager:
@@ -1494,7 +1594,7 @@ class DynamicAgentManager:
                 f"Refused: '{path}' is inside the application's internal data directory."
             )
         self._thread_workdirs[thread_id] = resolved
-        print(f"📂 Thread {thread_id} working directory set to: {resolved}")
+        _log("FILESYSTEM", "Thread working directory selected", thread_id=thread_id, workdir=str(resolved))
         return {"status": "ok", "thread_id": thread_id, "workdir": str(resolved)}
 
     def get_working_directory(self, thread_id: str) -> str:
@@ -1519,15 +1619,11 @@ class DynamicAgentManager:
 
     # ---------- graph nodes ----------
     def _planner_node(self, state: OrchestratorState):
-        _log("WORKFLOW", "===== NODE: planner =====")
+        _log("WORKFLOW", "Node started", node="planner")
         triggering_content = state["messages"][-1].content
         goal = _as_text(triggering_content)
         attachments = _extract_image_blocks(triggering_content)
-        _log(
-            "WORKFLOW",
-            f"🧭 Planning for goal: {goal!r}"
-            + (f" (+{len(attachments)} image attachment(s))" if attachments else ""),
-        )
+        _log("WORKFLOW", "Planning request", goal=goal, image_attachments=len(attachments))
 
         prior_history = state.get("conversation_history", []) or []
         history_text = _format_conversation_history(prior_history)
@@ -1578,7 +1674,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             plan = [{"id": "T1", "description": goal, "agent_role": "general"}]
         plan = plan[:MAX_TASKS]
 
-        _log_block("WORKFLOW", "📋 Task plan", json.dumps(plan, indent=2))
+        _log_block("WORKFLOW", "Task plan", json.dumps(plan, indent=2))
 
         return {
             "goal": goal,
@@ -1593,7 +1689,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         }
 
     def _agent_executor_node(self, state: OrchestratorState):
-        _log("WORKFLOW", "===== NODE: agent_executor =====")
+        _log("WORKFLOW", "Node started", node="agent_executor")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         role = task["agent_role"]
@@ -1627,13 +1723,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 
         tool_results_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
         if tool_results_count >= MAX_TOOL_CALLS_PER_TASK:
-            _log("WORKFLOW", f"⛔ [{role}] task {task['id']}: tool call limit reached ({tool_results_count}/{MAX_TOOL_CALLS_PER_TASK}), forcing final answer")
+            _log("WARNING", "Tool-call limit reached; requesting final answer", role=role, task_id=task["id"], tool_calls=tool_results_count, limit=MAX_TOOL_CALLS_PER_TASK)
             task_messages = task_messages + [
                 HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far.")
             ]
 
-        _log("WORKFLOW", f"🤖 [{role}] executing task {task['id']}: {task['description']}")
-        _log("AI-REQUEST", f"Invoking agent LLM [{role}] with {len(task_messages)} message(s) in context")
+        _log("WORKFLOW", "Executing task", role=role, task_id=task["id"], task=task["description"], tools=agent["tool_names"])
+        _log("AI-REQUEST", "Invoking task agent", role=role, task_id=task["id"], message_count=len(task_messages))
         response = agent["llm"].invoke(
             task_messages,
             config={
@@ -1649,9 +1745,9 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         tool_calls = getattr(response, "tool_calls", None) or []
         if tool_calls:
             for tc in tool_calls:
-                _log("AI-REPLY", f"[{role}] requested tool call -> {tc['name']}({json.dumps(tc.get('args', {}), default=str)})")
+                _log("AI-REPLY", "Agent requested tool call", role=role, task_id=task["id"], tool=tc["name"], arguments=tc.get("args", {}))
         else:
-            _log("AI-REPLY", f"[{role}] no tool calls requested; treating reply as this task's answer")
+            _log("AI-REPLY", "Agent returned final task answer without a tool call", role=role, task_id=task["id"])
 
         task_messages = task_messages + [response]
 
@@ -1660,23 +1756,23 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 
     def _tools_node(self, state: OrchestratorState):
         """Custom tool executor operating on task_messages."""
-        _log("WORKFLOW", "===== NODE: tools =====")
+        _log("WORKFLOW", "Node started", node="tools")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx] if idx < len(state["task_plan"]) else {"id": "?", "agent_role": "?"}
         last = state["task_messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
-        _log("WORKFLOW", f"🛠️ executing {len(tool_calls)} tool call(s) for task {task['id']}")
+        _log("WORKFLOW", "Executing tool calls", task_id=task["id"], call_count=len(tool_calls))
         tool_messages = []
         pending_images: list[dict] = []
         for call in tool_calls:
             tool_name = call["name"]
             tool_args = call.get("args", {})
-            _log("TOOL-CALL", f"→ {tool_name}({json.dumps(tool_args, default=str)})")
+            _log("TOOL-CALL", "Invoking tool", tool=tool_name, task_id=task["id"], arguments=tool_args)
             tool_obj = self.tool_registry.get_tool(tool_name)
             try:
                 if tool_obj is None:
                     result = f"Error: tool '{tool_name}' not found"
-                    _log("TOOL-RESULT", f"✗ {tool_name}: {result}")
+                    _log("ERROR", "Requested tool is not registered", tool=tool_name, task_id=task["id"])
                 else:
                     result = tool_obj.invoke(
                         tool_args,
@@ -1689,7 +1785,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                     _log_block("TOOL-RESULT", f"✓ {tool_name} result", str(result))
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
-                _log("TOOL-RESULT", f"✗ {tool_name} raised: {e}")
+                _log("ERROR", "Tool invocation raised an exception", tool=tool_name, task_id=task["id"], error=str(e))
 
             if isinstance(result, dict) and result.get("is_image"):
                 # ToolMessage content must stay a plain string (OpenAI's API
@@ -1715,11 +1811,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             extra_messages = extra_messages + [image_message]
 
         # Mirrored into `messages` too, same reason as agent_executor_node above
-        _log("WORKFLOW", f"🛠️ tool execution complete for task {task['id']}, returning to agent_executor")
+        _log("WORKFLOW", "Tool execution complete; returning to task agent", task_id=task["id"], image_results=len(pending_images))
         return {"task_messages": updated_task_messages, "messages": extra_messages}
 
     def _evaluator_node(self, state: OrchestratorState):
-        _log("WORKFLOW", "===== NODE: evaluator =====")
+        _log("WORKFLOW", "Node started", node="evaluator")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         task_messages = state["task_messages"]
@@ -1737,7 +1833,7 @@ Agent output: {final_content}
 Does this output satisfactorily complete the task? Respond with ONLY JSON:
 {{"status": "PASS" or "RETRY", "reason": "short reason", "feedback": "what to fix if RETRY"}}
 """
-        _log("AI-REQUEST", f"Invoking evaluator LLM for task {task['id']}")
+        _log_block("AI-REQUEST", f"Evaluator prompt for task {task['id']}", eval_prompt)
         eval_response = llm.invoke(
             eval_prompt,
             config={
@@ -1752,11 +1848,11 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             eval_response.content,
             default={"status": "PASS", "reason": "auto-accepted (unparseable verdict)", "feedback": ""},
         )
-        _log("WORKFLOW", f"🧪 Evaluation for {task['id']}: {verdict}")
+        _log("WORKFLOW", "Task evaluation completed", task_id=task["id"], verdict=verdict)
 
         retry_count = state.get("retry_count", 0)
         if verdict.get("status") == "RETRY" and retry_count < MAX_RETRIES:
-            _log("WORKFLOW", f"🔁 Task {task['id']} sent back for retry ({retry_count + 1}/{MAX_RETRIES}): {verdict.get('feedback', '')}")
+            _log("WARNING", "Task sent back for retry", task_id=task["id"], retry=retry_count + 1, max_retries=MAX_RETRIES, feedback=verdict.get("feedback", ""))
             feedback_msg = HumanMessage(
                 content=f"Evaluator feedback: {verdict.get('feedback', '')}. Please revise and try again."
             )
@@ -1768,7 +1864,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             }
 
         # Result accepted: either PASS, or retries exhausted
-        _log("WORKFLOW", f"✅ Task {task['id']} accepted, moving to next task")
+        _log("WORKFLOW", "Task accepted", task_id=task["id"], role=task["agent_role"])
         results = dict(state.get("task_results", {}))
         results[task["id"]] = final_content
         summary_msg = AIMessage(
@@ -1784,7 +1880,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         }
 
     def _assembler_node(self, state: OrchestratorState):
-        _log("WORKFLOW", "===== NODE: assembler =====")
+        _log("WORKFLOW", "Node started", node="assembler")
         results = state.get("task_results", {})
         plan = state.get("task_plan", [])
 
@@ -1813,7 +1909,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     @staticmethod
     def _route_after_planner(state: OrchestratorState):
         route = "assembler" if state["current_task_idx"] >= len(state["task_plan"]) else "agent_executor"
-        _log("WORKFLOW", f"↳ route_after_planner -> {route}")
+        _log("WORKFLOW", "Routing decision", from_node="planner", to_node=route)
         return route
 
     @staticmethod
@@ -1828,7 +1924,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
                 route = "tools"
             else:
                 route = "evaluator"
-        _log("WORKFLOW", f"↳ route_after_agent -> {route}")
+        _log("WORKFLOW", "Routing decision", from_node="agent_executor", to_node=route)
         return route
 
     @staticmethod
@@ -1839,7 +1935,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             route = "assembler"
         else:
             route = "agent_executor"
-        _log("WORKFLOW", f"↳ route_after_evaluator -> {route}")
+        _log("WORKFLOW", "Routing decision", from_node="evaluator", to_node=route)
         return route
 
     # ---------- graph build ----------
@@ -1889,10 +1985,10 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         try:
             self.tool_registry.create_tool_from_prompt(prompt, tool_name)
             self.chatbot = self._build_graph()
-            print(f"✅ Graph rebuilt with new tool: {tool_name}")
+            _log("REGISTRY", "Graph rebuilt after tool addition", tool=tool_name)
             return True
         except Exception as e:
-            print(f"❌ Failed to add tool: {e}")
+            _log("ERROR", "Failed to add dynamic tool", tool=tool_name, error=str(e))
             return False
 
     def remove_tool(self, tool_name: str) -> bool:
@@ -1908,7 +2004,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         if removed:
             self.agent_factory.remove_tool_from_agents(tool_name)
             self.chatbot = self._build_graph()
-            print(f"✅ Graph rebuilt after removing tool: {tool_name}")
+            _log("REGISTRY", "Graph rebuilt after tool removal", tool=tool_name)
         return removed
 
     def get_tool_info(self) -> str:
@@ -1974,8 +2070,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         if workdir:
             self.set_working_directory(thread_id, workdir)
 
-        _log("WORKFLOW", f"########## RUN START (thread={thread_id}) ##########")
-        _log("WORKFLOW", f"User input: {user_input!r}")
+        _log("WORKFLOW", "Run started", thread_id=thread_id, user_input=user_input, workdir=str(self._thread_workdirs.get(thread_id, DEFAULT_AGENT_WORKDIR)))
 
         usage_records: list = []
         ctx_token = _token_usage_ctx.set(usage_records)
@@ -2018,7 +2113,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             if isinstance(m, AIMessage) and getattr(m, "content", None):
                 final_ai_text = _as_text(m.content)
                 break
-        _log_block("FINAL-RESPONSE", f"########## RUN END (thread={thread_id}) — response returned to user", final_ai_text, max_chars=10_000)
+        _log_block("FINAL-RESPONSE", f"Run completed for thread '{thread_id}'", final_ai_text, max_chars=10_000)
         return response
 
     # ---------- token usage helpers ----------
@@ -2054,15 +2149,23 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     @staticmethod
     def _print_token_usage(user_input: str, token_usage: dict):
         totals = token_usage["totals"]
-        _log("TOKEN-USAGE", f"===== Token usage summary for prompt: {user_input[:80]!r} =====")
+        _log("TOKEN-USAGE", "Token usage summary", prompt_preview=user_input[:80], llm_calls=totals["llm_calls"])
         for c in token_usage["calls"]:
-            print(
-                f"   [{c['step']}] {c['node']:<32} "
-                f"in={c['input_tokens']:<6} out={c['output_tokens']:<6} total={c['total_tokens']}"
+            _log(
+                "TOKEN-USAGE",
+                "LLM call",
+                step=c["step"],
+                node=c["node"],
+                input_tokens=c["input_tokens"],
+                output_tokens=c["output_tokens"],
+                total_tokens=c["total_tokens"],
             )
-        print(
-            f"   {'TOTAL (' + str(totals['llm_calls']) + ' calls)':<36} "
-            f"in={totals['input_tokens']:<6} out={totals['output_tokens']:<6} total={totals['total_tokens']}\n"
+        _log(
+            "TOKEN-USAGE",
+            "Token usage total",
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            total_tokens=totals["total_tokens"],
         )
 
 
