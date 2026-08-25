@@ -15,10 +15,12 @@ import requests
 import json
 import re
 import base64
+import uuid
 import operator
 import contextvars
 import subprocess
 import venv
+from pathlib import Path
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import StructuredTool
@@ -26,6 +28,28 @@ from pydantic import create_model, Field
 from langsmith import traceable
 
 import document_pipeline as docpipe
+
+# Optional dependencies for the create_artifact tool. Each is only needed for
+# the artifact kinds that use it (docx for "doc", pptx for "slides",
+# weasyprint for "pdf") -- missing one doesn't break the other kinds, it
+# just makes that specific kind return a clear "pip install X" error instead
+# of failing to import at module load time.
+try:
+    import markdown as _markdown
+except ImportError:
+    _markdown = None
+try:
+    from docx import Document as _DocxDocument
+except ImportError:
+    _DocxDocument = None
+try:
+    from pptx import Presentation as _PptxPresentation
+except ImportError:
+    _PptxPresentation = None
+try:
+    import weasyprint as _weasyprint
+except ImportError:
+    _weasyprint = None
 
 load_dotenv()
 
@@ -85,9 +109,59 @@ MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its smoke test
 MAX_TOOL_CALLS_PER_TASK = 3  # max consecutive tool calls per task to prevent infinite loops
+MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
+MAX_LIST_ENTRIES = 500
 
 llm = ChatOpenAI(
     model="openai.gpt-oss-120b"
+)
+
+# ---------- agent workdir & path confinement ----------
+# Everything the agent's read_file/write_file/list_directory/create_artifact
+# tools touch lives under AGENT_WORKDIR. This is a *separate* tree from the
+# app's own storage (DB/, tool_envs/, tools/, logs/), so a careless or
+# adversarial write from agent (or LLM-generated tool) code can't reach the
+# checkpoint db, sandbox venvs, or persisted tool source.
+AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", os.path.join(os.getcwd(), "agent_workspace"))).resolve()
+AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
+
+ARTIFACTS_DIR = AGENT_WORKDIR / ".artifacts"
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Internal app directories the agent must never read/write/list, even if
+# AGENT_WORKDIR is ever misconfigured to overlap the project root. Resolved
+# lazily (not at import time) so they reflect wherever the process actually
+# ends up creating them (relative to cwd, same as the DB/tool_envs/logs
+# creation calls elsewhere in this file).
+_AGENT_DATA_DIR_NAMES = ("DB", "tool_envs", "tools", "logs")
+
+
+def _agent_data_roots() -> list[Path]:
+    return [Path(name).resolve() for name in _AGENT_DATA_DIR_NAMES]
+
+
+class PathConfinementError(Exception):
+    """Raised when a tool-requested path would escape AGENT_WORKDIR."""
+
+
+def resolve_and_confine(path_str: str | None, base: Path = None) -> Path:
+    """Canonicalize a path relative to `base` (default AGENT_WORKDIR) and
+    reject any escape (via '..' or a symlink) outside it."""
+    base = (base or AGENT_WORKDIR).resolve()
+    candidate = (base / path_str) if path_str else base
+    resolved = candidate.resolve()
+    if not (resolved == base or resolved.is_relative_to(base)):
+        raise PathConfinementError(f"Path escapes the agent workdir ({base}): {path_str!r}")
+    return resolved
+
+
+def _path_touches_agent_data(path: Path) -> bool:
+    return any(path == root or path.is_relative_to(root) for root in _agent_data_roots())
+
+
+_APP_DATA_ERROR = (
+    "Refused: this path is inside the application's internal data directory "
+    "(DB, tool_envs, tools, logs) -- never a target for agent file operations."
 )
 
 def parse_json_safely(text: str, default=None):
@@ -295,11 +369,122 @@ class ToolSandboxExecutor:
         return payload["result"]
 
 
+# ---------- artifact content converters (used by create_artifact tool) ----------
+_ARTIFACT_KINDS = {"doc", "pdf", "slides", "image"}
+
+_INLINE_MD_RE = re.compile(
+    r"\*\*(?P<bold1>.+?)\*\*"
+    r"|__(?P<bold2>.+?)__"
+    r"|\*(?P<italic1>.+?)\*"
+    r"|_(?P<italic2>.+?)_"
+    r"|`(?P<code>.+?)`"
+)
+
+
+def _add_inline_runs(paragraph, text: str) -> None:
+    """Splits a line on inline markdown (bold/italic/code) into styled runs
+    so a downloaded .docx shows real bold/italic instead of literal '**x**'."""
+    pos = 0
+    for match in _INLINE_MD_RE.finditer(text):
+        if match.start() > pos:
+            paragraph.add_run(text[pos:match.start()])
+        if match.group("bold1") is not None:
+            paragraph.add_run(match.group("bold1")).bold = True
+        elif match.group("bold2") is not None:
+            paragraph.add_run(match.group("bold2")).bold = True
+        elif match.group("italic1") is not None:
+            paragraph.add_run(match.group("italic1")).italic = True
+        elif match.group("italic2") is not None:
+            paragraph.add_run(match.group("italic2")).italic = True
+        elif match.group("code") is not None:
+            paragraph.add_run(match.group("code")).font.name = "Courier New"
+        pos = match.end()
+    if pos < len(text) or pos == 0:
+        paragraph.add_run(text[pos:])
+
+
+def _parse_md_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_md_table_separator(line: str) -> bool:
+    cells = _parse_md_table_row(line)
+    return bool(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells)
+
+
+def _add_docx_table(document, header: list[str], rows: list[list[str]]) -> None:
+    table = document.add_table(rows=1 + len(rows), cols=len(header))
+    table.style = "Table Grid"
+    for col, text in enumerate(header):
+        paragraph = table.rows[0].cells[col].paragraphs[0]
+        _add_inline_runs(paragraph, text)
+        for run in paragraph.runs:
+            run.bold = True
+    for r, row in enumerate(rows, start=1):
+        for col, text in enumerate(row):
+            if col < len(header):
+                _add_inline_runs(table.rows[r].cells[col].paragraphs[0], text)
+
+
+def _md_to_docx(content: str):
+    """Small, deliberately non-exhaustive Markdown -> docx converter: enough
+    structure for agent-authored reports (headings, bullets, paragraphs,
+    tables, inline bold/italic/code), not a full CommonMark implementation."""
+    document = _DocxDocument()
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+        if stripped.startswith("|") and i + 1 < len(lines) and _is_md_table_separator(lines[i + 1]):
+            header = _parse_md_table_row(stripped)
+            i += 2
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(_parse_md_table_row(lines[i]))
+                i += 1
+            _add_docx_table(document, header, rows)
+            continue
+        if stripped.startswith("### "):
+            _add_inline_runs(document.add_heading("", level=3), stripped[4:])
+        elif stripped.startswith("## "):
+            _add_inline_runs(document.add_heading("", level=2), stripped[3:])
+        elif stripped.startswith("# "):
+            _add_inline_runs(document.add_heading("", level=1), stripped[2:])
+        elif stripped.startswith(("- ", "* ")):
+            _add_inline_runs(document.add_paragraph(style="List Bullet"), stripped[2:])
+        else:
+            _add_inline_runs(document.add_paragraph(), stripped)
+        i += 1
+    return document
+
+
+def _build_pptx(slides: list[dict]):
+    presentation = _PptxPresentation()
+    layout = presentation.slide_layouts[1]  # "Title and Content"
+    for entry in slides:
+        slide = presentation.slides.add_slide(layout)
+        slide.shapes.title.text = entry["title"]
+        bullets = entry.get("bullets") or []
+        if bullets:
+            body = slide.placeholders[1].text_frame
+            body.text = bullets[0]
+            for bullet in bullets[1:]:
+                body.add_paragraph().text = bullet
+    return presentation
+
+
 class DynamicToolRegistry:
     """Manages dynamic tool creation and registration."""
     def __init__(self):
         self.tools: dict[str, BaseTool] = {}
         self.tool_code: dict[str, str] = {}
+        self.artifacts: list[dict] = []
+        """Side-channel that create_artifact appends to on success, mirroring
+        cowork's ctx.artifacts pattern -- lets the caller (Streamlit, etc.)
+        list what was produced during a run without parsing tool output."""
         self.sandbox = ToolSandboxExecutor()
         self._register_default_tools()
 
@@ -311,6 +496,13 @@ class DynamicToolRegistry:
         self.register_tool("read_document", self._read_document_tool())
         self.register_tool("list_documents", self._list_documents_tool())
         self.register_tool("generate_document", self._generate_document_tool())
+        self.register_tool("read_file", self._read_file_tool())
+        self.register_tool("write_file", self._write_file_tool())
+        self.register_tool("list_directory", self._list_directory_tool())
+        self.register_tool("create_artifact", self._create_artifact_tool())
+
+    def list_artifacts(self) -> list[dict]:
+        return list(self.artifacts)
 
     def register_tool(self, name: str, tool_obj: BaseTool, code: str = ""):
         """Register a tool, forcing tool_obj.name to match the registry key."""
@@ -342,6 +534,7 @@ class DynamicToolRegistry:
     _DEFAULT_TOOL_NAMES = (
         "search", "calculator", "stock_price",
         "read_document", "list_documents", "generate_document",
+        "read_file", "write_file", "list_directory", "create_artifact",
     )
 
     def remove_tool(self, name: str, delete_generated_code: bool = True) -> bool:
@@ -497,6 +690,200 @@ class DynamicToolRegistry:
             """
             return docpipe.generate_document(content, filename, format)
         return generate_document
+
+    @staticmethod
+    def _read_file_tool() -> BaseTool:
+        @tool
+        def read_file(path: str, start_line: int = 0, end_line: int = 0) -> dict:
+            """Read a text file from the agent workspace, optionally by line range.
+
+            Parameters
+            ----------
+            path : str
+                Path relative to the agent workspace. Must not be absolute
+                or contain '..' -- both are rejected.
+            start_line : int
+                1-indexed first line to include. 0 (default) means "from the start".
+            end_line : int
+                1-indexed last line to include. 0 (default) means "to the end".
+            """
+            try:
+                resolved = resolve_and_confine(path)
+            except PathConfinementError as e:
+                return {"error": str(e)}
+            if _path_touches_agent_data(resolved):
+                return {"error": _APP_DATA_ERROR}
+            if not resolved.is_file():
+                return {"error": f"Not a file: {path}"}
+
+            lines = resolved.read_text(errors="replace").splitlines(keepends=True)
+            if start_line or end_line:
+                start_idx = max((start_line or 1) - 1, 0)
+                end_idx = end_line if end_line else len(lines)
+                lines = lines[start_idx:end_idx]
+            content = "".join(lines)
+            truncated = len(content) > MAX_READ_CHARS
+            if truncated:
+                content = content[:MAX_READ_CHARS]
+            return {"path": path, "content": content, "truncated": truncated}
+        return read_file
+
+    @staticmethod
+    def _write_file_tool() -> BaseTool:
+        @tool
+        def write_file(path: str, content: str) -> dict:
+            """Create or overwrite a file in the agent workspace with the given
+            text content, creating parent directories as needed.
+
+            Parameters
+            ----------
+            path : str
+                Path relative to the agent workspace. Must not be absolute
+                or contain '..' -- both are rejected.
+            content : str
+                Full text content to write. This REPLACES the file if it
+                already exists.
+            """
+            try:
+                resolved = resolve_and_confine(path)
+            except PathConfinementError as e:
+                return {"error": str(e)}
+            if _path_touches_agent_data(resolved):
+                return {"error": _APP_DATA_ERROR}
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content, encoding="utf-8")
+            return {"status": "ok", "path": path, "bytes_written": len(content.encode("utf-8"))}
+        return write_file
+
+    @staticmethod
+    def _list_directory_tool() -> BaseTool:
+        @tool
+        def list_directory(path: str = "") -> dict:
+            """List files and directories at a path inside the agent workspace
+            (non-recursive). Pass an empty string for the workspace root.
+
+            Parameters
+            ----------
+            path : str
+                Path relative to the agent workspace. Must not be absolute
+                or contain '..' -- both are rejected.
+            """
+            try:
+                resolved = resolve_and_confine(path or None)
+            except PathConfinementError as e:
+                return {"error": str(e)}
+            if _path_touches_agent_data(resolved):
+                return {"error": _APP_DATA_ERROR}
+            if not resolved.is_dir():
+                return {"error": f"Not a directory: {path}"}
+
+            entries = sorted(resolved.iterdir(), key=lambda p: p.name)[:MAX_LIST_ENTRIES]
+            return {
+                "path": path,
+                "entries": [f"{'d' if e.is_dir() else 'f'} {e.name}" for e in entries],
+            }
+        return list_directory
+
+    def _create_artifact_tool(self) -> BaseTool:
+        """Instance method (not static) so the handler can append to
+        self.artifacts -- everything else in this registry is a static
+        closure, but create_artifact needs a side-channel back to the
+        registry, same reasoning as cowork's ctx.artifacts."""
+        registry = self
+
+        @tool
+        def create_artifact(filename: str, kind: str, title: str, content: str) -> dict:
+            """Create a distinct, previewable deliverable (report, diagram, or
+            slide deck) in the agent workspace's .artifacts folder, as opposed
+            to an ordinary working file written via write_file.
+
+            Parameters
+            ----------
+            filename : str
+                Base filename without extension.
+            kind : str
+                One of: "doc" (Markdown -> .md + .docx), "pdf" (Markdown ->
+                .pdf), "slides" (JSON -> .pptx), "image" (raw SVG -> .svg).
+            title : str
+                Human-readable title for the artifact.
+            content : str
+                Shape depends on kind:
+                - doc / pdf: Markdown text (headings, bullets, tables,
+                  inline bold/italic/code all supported).
+                - slides: JSON string like
+                  {"slides": [{"title": "...", "bullets": ["...", "..."]}]}
+                - image: raw SVG markup starting with "<svg" or "<?xml".
+            """
+            if kind not in _ARTIFACT_KINDS:
+                return {"error": f"Unknown artifact kind: {kind!r}. Must be one of {sorted(_ARTIFACT_KINDS)}."}
+
+            artifact_id = uuid.uuid4().hex
+            stem = f"{artifact_id}__{filename}"
+            out_dir = ARTIFACTS_DIR
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                if kind == "doc":
+                    if _DocxDocument is None:
+                        return {"error": "python-docx is not installed. Run: pip install python-docx"}
+                    (out_dir / f"{stem}.md").write_text(content, encoding="utf-8")
+                    _md_to_docx(content).save(out_dir / f"{stem}.docx")
+                    preview_path = out_dir / f"{stem}.md"
+                    download_path = out_dir / f"{stem}.docx"
+
+                elif kind == "pdf":
+                    if _weasyprint is None or _markdown is None:
+                        return {"error": "weasyprint/markdown are not installed. Run: pip install weasyprint markdown"}
+                    html = _markdown.markdown(content, extensions=["extra"])
+                    pdf_path = out_dir / f"{stem}.pdf"
+                    _weasyprint.HTML(string=html).write_pdf(str(pdf_path))
+                    preview_path = download_path = pdf_path
+
+                elif kind == "slides":
+                    if _PptxPresentation is None:
+                        return {"error": "python-pptx is not installed. Run: pip install python-pptx"}
+                    try:
+                        parsed = json.loads(content)
+                        slides = parsed["slides"]
+                        if not isinstance(slides, list) or not slides:
+                            raise ValueError("'slides' must be a non-empty array")
+                        for entry in slides:
+                            if not isinstance(entry.get("title"), str):
+                                raise ValueError("each slide needs a string 'title'")
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                        return {
+                            "error": (
+                                "Invalid slides content -- expected JSON like "
+                                '{"slides": [{"title": "...", "bullets": ["...", "..."]}]}. '
+                                f"Error: {exc}"
+                            )
+                        }
+                    (out_dir / f"{stem}.json").write_text(json.dumps(parsed), encoding="utf-8")
+                    _build_pptx(slides).save(out_dir / f"{stem}.pptx")
+                    preview_path = out_dir / f"{stem}.json"
+                    download_path = out_dir / f"{stem}.pptx"
+
+                else:  # image
+                    stripped = content.strip()
+                    if not (stripped.startswith("<svg") or stripped.startswith("<?xml")):
+                        return {"error": "Image artifact content must be raw SVG markup starting with <svg ...> or <?xml ...>."}
+                    svg_path = out_dir / f"{stem}.svg"
+                    svg_path.write_text(content, encoding="utf-8")
+                    preview_path = download_path = svg_path
+            except Exception as e:
+                return {"error": f"Failed to build {kind} artifact: {type(e).__name__}: {e}"}
+
+            record = {
+                "artifact_id": artifact_id,
+                "filename": filename,
+                "kind": kind,
+                "title": title,
+                "preview_path": str(preview_path),
+                "download_path": str(download_path),
+            }
+            registry.artifacts.append(record)
+            return {"status": "created", **record}
+        return create_artifact
 
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
@@ -1244,6 +1631,9 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     def get_agent_info(self) -> str:
         return json.dumps(self.agent_factory.list_agents(), indent=2)
 
+    def get_artifacts(self) -> list[dict]:
+        return self.tool_registry.list_artifacts()
+
     def list_threads(self, limit: int = 50) -> list[dict]:
         """List known thread_ids with a title (first user message) and last-updated time, most recent first."""
         latest_by_thread: dict[str, dict] = {}
@@ -1370,6 +1760,10 @@ def get_agent_tools() -> str:
 
 def get_agent_registry() -> str:
     return agent_manager.get_agent_info()
+
+
+def get_artifacts() -> list[dict]:
+    return agent_manager.get_artifacts()
 
 
 def add_tool_dynamically(tool_name: str, tool_prompt: str) -> bool:
