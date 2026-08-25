@@ -96,6 +96,27 @@ def _setup_console_logging(log_dir: str = "logs") -> str:
 LOG_FILE_PATH = _setup_console_logging()
 print(f"🗒️ Logging console output to: {LOG_FILE_PATH}")
 
+
+def _log(tag: str, msg: str = "") -> None:
+    """Single-line, timestamped log entry. `tag` identifies which part of the
+    workflow this line is about (WORKFLOW / AI-REQUEST / AI-REPLY / TOOL-CALL /
+    TOOL-RESULT / FINAL-RESPONSE / ...) so the console/log file can be scanned
+    or grepped for just one stage of a run."""
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[{ts}] [{tag}] {msg}")
+
+
+def _log_block(tag: str, title: str, body: str, max_chars: int = 2000) -> None:
+    """Same as _log but for multi-line payloads (prompts, AI replies, tool
+    output) -- prints a header line followed by the (possibly truncated)
+    body so long content doesn't spam the single-line log stream."""
+    body = body if body is not None else ""
+    truncated = len(body) > max_chars
+    shown = body[:max_chars] + (f"\n... [truncated, {len(body) - max_chars} more chars]" if truncated else "")
+    _log(tag, f"{title}:")
+    for line in shown.splitlines() or [""]:
+        print(f"    {line}")
+
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Dynamic-LangGraph-Backend"
@@ -1331,7 +1352,7 @@ Rules:
 
     @traceable(name="create_agent", run_type="chain")
     def create_agent(self, role: str, task_description: str) -> dict:
-        print(f"🧬 Creating new agent for role: '{role}'")
+        _log("WORKFLOW", f"🧬 Creating new agent for role: '{role}'")
         available_tools = self.tool_registry.list_tools()
 
         selection_prompt = f"""
@@ -1356,6 +1377,7 @@ Rules:
   Leave it as an empty list if the available tools are sufficient.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
+        _log("AI-REQUEST", f"Invoking agent-creation LLM for role '{role}'")
         response = llm.invoke(
             selection_prompt,
             config={
@@ -1365,9 +1387,10 @@ Rules:
             },
         )
         _record_token_usage(f"agent_creation:{role}", response, ["agent_creation"])
+        _log_block("AI-REPLY", f"Agent-creation reply for role '{role}'", _as_text(response.content))
         config = parse_json_safely(response.content, default=None)
         if config is None:
-            print(f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
+            _log("AI-REPLY", f"⚠️ Tool selection JSON parse failed for role '{role}'. Raw response: {response.content[:300]!r}")
             config = {
                 "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
                 "tools": [],
@@ -1392,7 +1415,7 @@ Rules:
             "llm": agent_llm,
         }
         self.agents[role] = agent_conf
-        print(f"✅ Agent '{role}' created with tools: {agent_conf['tool_names']}")
+        _log("WORKFLOW", f"✅ Agent '{role}' created with tools: {agent_conf['tool_names']}")
         return agent_conf
 
     def list_agents(self) -> dict:
@@ -1482,10 +1505,15 @@ class DynamicAgentManager:
 
     # ---------- graph nodes ----------
     def _planner_node(self, state: OrchestratorState):
+        _log("WORKFLOW", "===== NODE: planner =====")
         triggering_content = state["messages"][-1].content
         goal = _as_text(triggering_content)
         attachments = _extract_image_blocks(triggering_content)
-        print(f"🧭 Planning for goal: {goal}" + (f" (+{len(attachments)} image attachment(s))" if attachments else ""))
+        _log(
+            "WORKFLOW",
+            f"🧭 Planning for goal: {goal!r}"
+            + (f" (+{len(attachments)} image attachment(s))" if attachments else ""),
+        )
 
         prior_history = state.get("conversation_history", []) or []
         history_text = _format_conversation_history(prior_history)
@@ -1520,6 +1548,7 @@ Return ONLY a JSON array, no prose, like:
 
 Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 """
+        _log_block("AI-REQUEST", "Prompt sent to LLM (planner)", planning_prompt)
         response = llm.invoke(
             planning_prompt,
             config={
@@ -1529,12 +1558,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             },
         )
         _record_token_usage("planner", response, ["planner"])
+        _log_block("AI-REPLY", "Raw LLM reply (planner)", _as_text(response.content))
         plan = parse_json_safely(response.content, default=None)
         if not plan or not isinstance(plan, list):
             plan = [{"id": "T1", "description": goal, "agent_role": "general"}]
         plan = plan[:MAX_TASKS]
 
-        print(f"📋 Task plan: {json.dumps(plan, indent=2)}")
+        _log_block("WORKFLOW", "📋 Task plan", json.dumps(plan, indent=2))
 
         return {
             "goal": goal,
@@ -1549,6 +1579,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         }
 
     def _agent_executor_node(self, state: OrchestratorState):
+        _log("WORKFLOW", "===== NODE: agent_executor =====")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         role = task["agent_role"]
@@ -1580,14 +1611,15 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 HumanMessage(content=init_content),
             ]
 
-        # Check if max tool calls limit is reached for this task
         tool_results_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
         if tool_results_count >= MAX_TOOL_CALLS_PER_TASK:
+            _log("WORKFLOW", f"⛔ [{role}] task {task['id']}: tool call limit reached ({tool_results_count}/{MAX_TOOL_CALLS_PER_TASK}), forcing final answer")
             task_messages = task_messages + [
                 HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far.")
             ]
 
-        print(f"🤖 [{role}] executing task {task['id']}: {task['description']}")
+        _log("WORKFLOW", f"🤖 [{role}] executing task {task['id']}: {task['description']}")
+        _log("AI-REQUEST", f"Invoking agent LLM [{role}] with {len(task_messages)} message(s) in context")
         response = agent["llm"].invoke(
             task_messages,
             config={
@@ -1597,26 +1629,40 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             },
         )
         _record_token_usage(f"agent_executor:{role}:{task['id']}", response, ["agent_executor", role])
+
+        reply_text = _as_text(response.content)
+        _log_block("AI-REPLY", f"[{role}] LLM reply for task {task['id']}", reply_text or "(no text content)")
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if tool_calls:
+            for tc in tool_calls:
+                _log("AI-REPLY", f"[{role}] requested tool call -> {tc['name']}({json.dumps(tc.get('args', {}), default=str)})")
+        else:
+            _log("AI-REPLY", f"[{role}] no tool calls requested; treating reply as this task's answer")
+
         task_messages = task_messages + [response]
 
-        # Mirror into top-level `messages` so LangSmith's Messages panel shows this turn
+        # Mirrored into top-level `messages` so LangSmith's Messages panel shows this turn
         return {"task_messages": task_messages, "messages": [response]}
 
     def _tools_node(self, state: OrchestratorState):
         """Custom tool executor operating on task_messages."""
+        _log("WORKFLOW", "===== NODE: tools =====")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx] if idx < len(state["task_plan"]) else {"id": "?", "agent_role": "?"}
         last = state["task_messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
+        _log("WORKFLOW", f"🛠️ executing {len(tool_calls)} tool call(s) for task {task['id']}")
         tool_messages = []
         pending_images: list[dict] = []
         for call in tool_calls:
             tool_name = call["name"]
             tool_args = call.get("args", {})
+            _log("TOOL-CALL", f"→ {tool_name}({json.dumps(tool_args, default=str)})")
             tool_obj = self.tool_registry.get_tool(tool_name)
             try:
                 if tool_obj is None:
                     result = f"Error: tool '{tool_name}' not found"
+                    _log("TOOL-RESULT", f"✗ {tool_name}: {result}")
                 else:
                     result = tool_obj.invoke(
                         tool_args,
@@ -1626,8 +1672,10 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                             "metadata": {"task_id": task["id"], "agent_role": task.get("agent_role", "?")},
                         },
                     )
+                    _log_block("TOOL-RESULT", f"✓ {tool_name} result", str(result))
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
+                _log("TOOL-RESULT", f"✗ {tool_name} raised: {e}")
 
             if isinstance(result, dict) and result.get("is_image"):
                 # ToolMessage content must stay a plain string (OpenAI's API
@@ -1652,10 +1700,12 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             updated_task_messages = updated_task_messages + [image_message]
             extra_messages = extra_messages + [image_message]
 
-        # Mirror into `messages` too, same reason as agent_executor_node above
+        # Mirrored into `messages` too, same reason as agent_executor_node above
+        _log("WORKFLOW", f"🛠️ tool execution complete for task {task['id']}, returning to agent_executor")
         return {"task_messages": updated_task_messages, "messages": extra_messages}
 
     def _evaluator_node(self, state: OrchestratorState):
+        _log("WORKFLOW", "===== NODE: evaluator =====")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         task_messages = state["task_messages"]
@@ -1673,6 +1723,7 @@ Agent output: {final_content}
 Does this output satisfactorily complete the task? Respond with ONLY JSON:
 {{"status": "PASS" or "RETRY", "reason": "short reason", "feedback": "what to fix if RETRY"}}
 """
+        _log("AI-REQUEST", f"Invoking evaluator LLM for task {task['id']}")
         eval_response = llm.invoke(
             eval_prompt,
             config={
@@ -1682,14 +1733,16 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             },
         )
         _record_token_usage(f"evaluator:{task['id']}", eval_response, ["evaluator", task["agent_role"]])
+        _log_block("AI-REPLY", f"Raw evaluator reply for task {task['id']}", _as_text(eval_response.content))
         verdict = parse_json_safely(
             eval_response.content,
             default={"status": "PASS", "reason": "auto-accepted (unparseable verdict)", "feedback": ""},
         )
-        print(f"🧪 Evaluation for {task['id']}: {verdict}")
+        _log("WORKFLOW", f"🧪 Evaluation for {task['id']}: {verdict}")
 
         retry_count = state.get("retry_count", 0)
         if verdict.get("status") == "RETRY" and retry_count < MAX_RETRIES:
+            _log("WORKFLOW", f"🔁 Task {task['id']} sent back for retry ({retry_count + 1}/{MAX_RETRIES}): {verdict.get('feedback', '')}")
             feedback_msg = HumanMessage(
                 content=f"Evaluator feedback: {verdict.get('feedback', '')}. Please revise and try again."
             )
@@ -1700,7 +1753,8 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
                 "last_verdict": verdict,
             }
 
-        # Accept result (PASS, or retries exhausted)
+        # Result accepted: either PASS, or retries exhausted
+        _log("WORKFLOW", f"✅ Task {task['id']} accepted, moving to next task")
         results = dict(state.get("task_results", {}))
         results[task["id"]] = final_content
         summary_msg = AIMessage(
@@ -1716,6 +1770,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         }
 
     def _assembler_node(self, state: OrchestratorState):
+        _log("WORKFLOW", "===== NODE: assembler =====")
         results = state.get("task_results", {})
         plan = state.get("task_plan", [])
 
@@ -1724,6 +1779,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             summary_prompt += f"- {t['description']}: {results.get(t['id'], 'N/A')}\n"
         summary_prompt += "\nWrite a single, coherent final answer to the original goal, using the results above."
 
+        _log_block("AI-REQUEST", "Prompt sent to LLM (assembler)", summary_prompt)
         final = llm.invoke(
             summary_prompt,
             config={
@@ -1733,7 +1789,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             },
         )
         _record_token_usage("assembler", final, ["assembler"])
-        print("📦 Final result assembled")
+        _log_block("FINAL-RESPONSE", "📦 Final response to user", _as_text(final.content), max_chars=10_000)
         return {
             "messages": [final],
             "conversation_history": [{"role": "assistant", "content": final.content}],
@@ -1742,28 +1798,35 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     # ---------- routing ----------
     @staticmethod
     def _route_after_planner(state: OrchestratorState):
-        if state["current_task_idx"] >= len(state["task_plan"]):
-            return "assembler"
-        return "agent_executor"
+        route = "assembler" if state["current_task_idx"] >= len(state["task_plan"]) else "agent_executor"
+        _log("WORKFLOW", f"↳ route_after_planner -> {route}")
+        return route
 
     @staticmethod
     def _route_after_agent(state: OrchestratorState):
         task_messages = state.get("task_messages", [])
         if not task_messages:
-            return "evaluator"
-        last = task_messages[-1]
-        tool_call_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
-        if getattr(last, "tool_calls", None) and tool_call_count < MAX_TOOL_CALLS_PER_TASK:
-            return "tools"
-        return "evaluator"
+            route = "evaluator"
+        else:
+            last = task_messages[-1]
+            tool_call_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+            if getattr(last, "tool_calls", None) and tool_call_count < MAX_TOOL_CALLS_PER_TASK:
+                route = "tools"
+            else:
+                route = "evaluator"
+        _log("WORKFLOW", f"↳ route_after_agent -> {route}")
+        return route
 
     @staticmethod
     def _route_after_evaluator(state: OrchestratorState):
         if state.get("task_messages"):  # retry pending, still has scratch messages
-            return "agent_executor"
-        if state["current_task_idx"] >= len(state["task_plan"]):
-            return "assembler"
-        return "agent_executor"
+            route = "agent_executor"
+        elif state["current_task_idx"] >= len(state["task_plan"]):
+            route = "assembler"
+        else:
+            route = "agent_executor"
+        _log("WORKFLOW", f"↳ route_after_evaluator -> {route}")
+        return route
 
     # ---------- graph build ----------
     def _build_graph(self):
@@ -1917,6 +1980,9 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
 
         message_content = docpipe.build_multimodal_message(user_input, doc_ids)
 
+        _log("WORKFLOW", f"########## RUN START (thread={thread_id}) ##########")
+        _log("WORKFLOW", f"User input: {user_input!r}")
+
         usage_records: list = []
         ctx_token = _token_usage_ctx.set(usage_records)
         workdir_token = _workdir_ctx.set(self._thread_workdirs.get(thread_id))
@@ -1932,6 +1998,13 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         token_usage = self._summarize_token_usage(usage_records)
         self._print_token_usage(user_input, token_usage)
         response["token_usage"] = token_usage
+
+        final_ai_text = ""
+        for m in reversed(response.get("messages", [])):
+            if isinstance(m, AIMessage) and getattr(m, "content", None):
+                final_ai_text = _as_text(m.content)
+                break
+        _log_block("FINAL-RESPONSE", f"########## RUN END (thread={thread_id}) — response returned to user", final_ai_text, max_chars=10_000)
         return response
 
     # ---------- token usage helpers ----------
