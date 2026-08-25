@@ -12,3 +12,5 @@ tools/
 logs.txt
 generated_documents
 tool_envs
+agent_workspace
+downloads

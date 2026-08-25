@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
-from dynamic_langgraph_backend import agent_manager
+from dynamic_langgraph_backend import (
+    agent_manager,
+    DEFAULT_AGENT_WORKDIR,
+    WorkdirSelectionError,
+    _workdir_ctx,
+)
 import document_pipeline as docpipe
 
 app = FastAPI(title="Dynamic Multi-Agent Orchestrator API")
@@ -30,6 +36,11 @@ class ChatRequest(BaseModel):
 
 class ThreadResponse(BaseModel):
     thread_id: str
+
+
+class WorkdirSelectRequest(BaseModel):
+    thread_id: str
+    path: str
 
 
 @app.get("/health")
@@ -65,24 +76,84 @@ def thread_messages(thread_id: str):
     return {"thread_id": thread_id, "messages": agent_manager.get_thread_history(thread_id)}
 
 
+# ---------- working directory (Cowork-style folder picker) ----------
+# The picker in the UI is an in-app folder browser (not a native OS dialog --
+# browsers don't expose real filesystem paths from `<input type=file>`), so
+# /fs/browse drives that: it lists only subdirectories of a server-side
+# path, for the user to navigate and pick from.
+
+@app.get("/fs/browse")
+def browse_workdir(path: str | None = None):
+    """List subdirectories of `path` for the folder-picker UI. Defaults to
+    the server's home directory. Only directories are returned -- files
+    aren't relevant to picking a working directory -- but each entry is
+    still tagged is_dir so the UI's generic filtering works."""
+    base = Path(path).expanduser().resolve() if path else Path.home().resolve()
+    if not base.exists() or not base.is_dir():
+        raise HTTPException(status_code=404, detail=f"Not a directory: {base}")
+
+    try:
+        entries = sorted(
+            (p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=lambda p: p.name.lower(),
+        )
+    except PermissionError:
+        entries = []
+
+    return {
+        "path": str(base),
+        "parent": str(base.parent) if base != base.parent else None,
+        "entries": [{"name": p.name, "path": str(p), "is_dir": True} for p in entries],
+    }
+
+
+@app.get("/workdir")
+def get_workdir(thread_id: str):
+    """The folder a thread's file tools are currently confined to."""
+    path = agent_manager.get_working_directory(thread_id)
+    return {"thread_id": thread_id, "workdir": path, "is_default": path == str(DEFAULT_AGENT_WORKDIR)}
+
+
+@app.post("/workdir")
+def select_workdir(req: WorkdirSelectRequest):
+    """Point a thread's file tools (read_file/write_file/list_directory/
+    view_image/create_artifact) at an existing folder on disk."""
+    try:
+        result = agent_manager.set_working_directory(req.thread_id, req.path)
+    except WorkdirSelectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"thread_id": req.thread_id, "workdir": result["workdir"]}
+
+
+@app.delete("/workdir")
+def clear_workdir(thread_id: str):
+    """Reset a thread back to the default agent workspace."""
+    agent_manager.clear_working_directory(thread_id)
+    return {"thread_id": thread_id, "workdir": agent_manager.get_working_directory(thread_id)}
+
+
 @app.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
-    """Phase 1: extract a PDF/DOCX/TXT/CSV/XLSX file to plain text and store it in memory."""
+    """Upload a file for the agent to see: PDF/DOCX/TXT/CSV/XLSX are
+    extracted to plain text; PNG/JPG/GIF/WEBP are stored for vision.
+    Either way, returns a doc_id ready to attach to a chat message."""
     data = await file.read()
     try:
-        text = docpipe.extract_text(file.filename, data)
+        doc_id = docpipe.process_upload(file.filename, data)
     except docpipe.UnsupportedFileType as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:  # e.g. image over the size cap
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Could not extract content: {e}")
+        raise HTTPException(status_code=422, detail=f"Could not process file: {e}")
 
-    doc_id = docpipe.document_store.add(file.filename, text)
     doc = docpipe.document_store.get(doc_id)
     return {
         "doc_id": doc_id,
         "filename": doc["filename"],
-        "char_count": doc["char_count"],
-        "preview": text[:500],
+        "is_image": doc["is_image"],
+        "char_count": doc.get("char_count", 0),
+        "preview": None if doc["is_image"] else doc["text"][:500],
     }
 
 
@@ -110,18 +181,12 @@ def list_generated_documents():
 @app.post("/chat")
 def chat(req: ChatRequest):
     """Run the full graph and return only the final assembled answer.
-    If doc_id is set, the document's extracted text is folded into the goal
-    message so the planner/agents see it like any other input."""
+    If doc_id is set, it's attached to the goal message -- folded into the
+    prompt as text for documents, or as real vision content for images."""
     thread_id = req.thread_id or str(uuid.uuid4())
-    try:
-        effective_goal = (
-            docpipe.build_prompt_with_document(req.goal, req.doc_id)
-            if req.doc_id else req.goal
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    doc_ids = [req.doc_id] if req.doc_id else None
 
-    result = agent_manager.run(effective_goal, thread_id)
+    result = agent_manager.run(req.goal, thread_id, doc_ids=doc_ids)
     messages = result.get("messages", [])
     final_answer = messages[-1].content if messages else ""
     return {"thread_id": thread_id, "answer": final_answer}
@@ -131,16 +196,19 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _stream_events(goal: str, thread_id: str, doc_id: str | None = None):
-    if doc_id:
+def _stream_events(goal: str, thread_id: str, doc_id: str | None = None, workdir: str | None = None):
+    # A folder picked before this thread existed rides along on the first
+    # message (see index.html's `pendingWorkdir`) -- apply it up front so
+    # the rest of the stream, and every later turn on this thread_id, sees it.
+    if workdir:
         try:
-            effective_goal = docpipe.build_prompt_with_document(goal, doc_id)
-        except KeyError as e:
+            agent_manager.set_working_directory(thread_id, workdir)
+        except WorkdirSelectionError as e:
             yield _sse("error", {"message": str(e)})
             yield _sse("done", {"answer": ""})
             return
-    else:
-        effective_goal = goal
+
+    message_content = docpipe.build_multimodal_message(goal, [doc_id] if doc_id else None)
 
     config = {
         "configurable": {"thread_id": thread_id},
@@ -149,44 +217,65 @@ def _stream_events(goal: str, thread_id: str, doc_id: str | None = None):
         "metadata": {"goal": goal, "thread_id": thread_id, "doc_id": doc_id},
     }
 
-    yield _sse("thread", {"thread_id": thread_id})
+    yield _sse("thread", {"thread_id": thread_id, "workdir": agent_manager.get_working_directory(thread_id)})
 
     final_answer = ""
-    for update in agent_manager.chatbot.stream(
-        {"messages": [HumanMessage(content=effective_goal)]},
-        config=config,
-        stream_mode="updates",
-    ):
-        for node_name, node_output in update.items():
+    # Each item Starlette pulls from this generator runs via a separate
+    # threadpool call with its own COPY of the request's contextvars.Context
+    # (see anyio.to_thread.run_sync / Starlette's iterate_in_threadpool), so
+    # a contextvars.Token set before this loop can't be reset later -- it
+    # belongs to a different Context by then -- and a single set() before the
+    # loop wouldn't even be visible to tool calls made on later resumes.
+    # Re-asserting the thread's workdir right before each pull instead puts
+    # it in the SAME Context that update's read_file/write_file/
+    # list_directory/view_image/create_artifact tool calls actually run in.
+    resolved_workdir = agent_manager._thread_workdirs.get(thread_id)
+    try:
+        stream_iter = agent_manager.chatbot.stream(
+            {"messages": [HumanMessage(content=message_content)]},
+            config=config,
+            stream_mode="updates",
+        )
+        while True:
+            _workdir_ctx.set(resolved_workdir)
+            try:
+                update = next(stream_iter)
+            except StopIteration:
+                break
 
-            if node_name == "planner":
-                yield _sse("plan", {"task_plan": node_output.get("task_plan", [])})
+            for node_name, node_output in update.items():
 
-            elif node_name == "agent_executor":
-                yield _sse("status", {"message": "agent working on current task"})
+                if node_name == "planner":
+                    yield _sse("plan", {"task_plan": node_output.get("task_plan", [])})
 
-            elif node_name == "tools":
-                yield _sse("status", {"message": "executing tool call(s)"})
+                elif node_name == "agent_executor":
+                    yield _sse("status", {"message": "agent working on current task"})
 
-            elif node_name == "evaluator":
-                verdict = node_output.get("last_verdict", {})
-                yield _sse("evaluation", verdict)
+                elif node_name == "tools":
+                    yield _sse("status", {"message": "executing tool call(s)"})
 
-            elif node_name == "assembler":
-                msgs = node_output.get("messages", [])
-                if msgs:
-                    final_answer = msgs[-1].content
-                    yield _sse("final_answer", {"answer": final_answer})
+                elif node_name == "evaluator":
+                    verdict = node_output.get("last_verdict", {})
+                    yield _sse("evaluation", verdict)
+
+                elif node_name == "assembler":
+                    msgs = node_output.get("messages", [])
+                    if msgs:
+                        final_answer = msgs[-1].content
+                        yield _sse("final_answer", {"answer": final_answer})
+    except Exception as e:
+        print(f"\n❌ Stream error for prompt: {goal[:80]!r}: {e}")
+        yield _sse("error", {"message": str(e)})
 
     print(f"\n✅ Stream finished for prompt: {goal[:80]!r}")
     yield _sse("done", {"answer": final_answer})
 
 
 @app.get("/chat/stream")
-def chat_stream(goal: str, thread_id: str | None = None, doc_id: str | None = None):
+def chat_stream(goal: str, thread_id: str | None = None, doc_id: str | None = None, workdir: str | None = None):
     tid = thread_id or str(uuid.uuid4())
     return StreamingResponse(
-        _stream_events(goal, tid, doc_id),
+        _stream_events(goal, tid, doc_id, workdir),
         media_type="text/event-stream",
     )
 

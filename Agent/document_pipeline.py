@@ -17,11 +17,22 @@ import uuid
 from datetime import datetime
 
 MAX_CHARS_FOR_CONTEXT = 12000  # MVP: whole-document context, no chunking/retrieval yet
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB cap on a single image attachment
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
+TEXT_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | IMAGE_EXTENSIONS
 
 GENERATED_DOCS_DIR = os.path.join(os.path.dirname(__file__), "generated_documents")
 os.makedirs(GENERATED_DOCS_DIR, exist_ok=True)
+
+_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 class UnsupportedFileType(Exception):
@@ -36,6 +47,14 @@ def detect_file_type(filename: str) -> str:
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
     return ext
+
+
+def is_image_extension(ext: str) -> bool:
+    return ext.lower() in IMAGE_EXTENSIONS
+
+
+def image_mime_type(ext: str) -> str:
+    return _IMAGE_MIME_TYPES.get(ext.lower(), "application/octet-stream")
 
 
 # ---------- extractors (one per type, common text out) ----------
@@ -90,6 +109,14 @@ _EXTRACTORS = {
 def extract_text(filename: str, data: bytes) -> str:
     """Detect file type, extract, and convert to a common plain-text format."""
     ext = detect_file_type(filename)
+    if ext not in _EXTRACTORS:
+        # ext is a valid SUPPORTED_EXTENSIONS member (e.g. an image type) but
+        # has no text extractor -- fail with a clear message instead of a
+        # raw KeyError if a caller ever routes an image here directly
+        # (process_upload() itself avoids this by checking is_image_extension first).
+        raise UnsupportedFileType(
+            f"'{ext}' has no text extractor -- route image files through add_image() instead."
+        )
     text = _EXTRACTORS[ext](data).strip()
     if not text:
         raise ValueError("No extractable text found in this file.")
@@ -107,8 +134,37 @@ class DocumentStore:
         self._docs[doc_id] = {
             "doc_id": doc_id,
             "filename": filename,
+            "is_image": False,
             "text": text,
             "char_count": len(text),
+            "uploaded_at": datetime.now().isoformat(),
+        }
+        return doc_id
+
+    def add_image(self, filename: str, data: bytes) -> str:
+        """Store an uploaded image as base64 for later multimodal attachment
+        (vision), instead of forcing it through a text extractor. Kept
+        separate from add() because images have no "text" -- callers that
+        need one (read_document, prompt folding) get a short placeholder."""
+        import base64
+
+        ext = detect_file_type(filename)
+        if not is_image_extension(ext):
+            raise UnsupportedFileType(f"add_image called with a non-image file: {filename!r}")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Image too large ({len(data)} bytes) -- limit is {MAX_IMAGE_BYTES} bytes."
+            )
+
+        doc_id = str(uuid.uuid4())
+        self._docs[doc_id] = {
+            "doc_id": doc_id,
+            "filename": filename,
+            "is_image": True,
+            "mime_type": image_mime_type(ext),
+            "data_b64": base64.b64encode(data).decode("ascii"),
+            "text": f"[Image file: {filename}]",
+            "char_count": 0,
             "uploaded_at": datetime.now().isoformat(),
         }
         return doc_id
@@ -118,12 +174,23 @@ class DocumentStore:
 
     def list(self) -> list[dict]:
         return [
-            {k: v for k, v in d.items() if k != "text"}
+            {k: v for k, v in d.items() if k not in ("text", "data_b64")}
             for d in sorted(self._docs.values(), key=lambda d: d["uploaded_at"], reverse=True)
         ]
 
 
 document_store = DocumentStore()
+
+
+def process_upload(filename: str, data: bytes) -> str:
+    """Unified upload entrypoint: routes to text extraction or image storage
+    based on extension, and returns the resulting doc_id either way -- the
+    one function an upload endpoint needs to call regardless of file kind."""
+    ext = detect_file_type(filename)
+    if is_image_extension(ext):
+        return document_store.add_image(filename, data)
+    text = extract_text(filename, data)
+    return document_store.add(filename, text)
 
 
 # ---------- prompt helper (for folding doc text into user messages) ----------
@@ -146,6 +213,52 @@ def build_prompt_with_document(user_text: str, doc_id: str) -> str:
         f"{context}\n"
         f"--- end document ---"
     )
+
+
+def build_multimodal_message(user_text: str, doc_ids: list[str] | None) -> str | list[dict]:
+    """Fold a mix of attached documents/images into one message payload.
+
+    Text-extractable docs (pdf/docx/txt/csv/xlsx) are folded into the text
+    the same way build_prompt_with_document does. Images become separate
+    OpenAI-style `image_url` content blocks so a vision-capable model can
+    actually see them -- something a single text string can never carry.
+
+    Returns a plain str when there are no images (so callers that don't
+    care about attachments can keep treating the result as ordinary text),
+    or a list of content blocks (str block + image blocks) when at least
+    one image is attached -- the shape LangChain's HumanMessage(content=...)
+    expects for multimodal input.
+    """
+    if not doc_ids:
+        return user_text
+
+    text_parts = [user_text]
+    image_blocks: list[dict] = []
+    for doc_id in doc_ids:
+        doc = document_store.get(doc_id)
+        if doc is None:
+            text_parts.append(f"\n\n[Attachment error: no document found with id {doc_id}]")
+            continue
+        if doc.get("is_image"):
+            image_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{doc['mime_type']};base64,{doc['data_b64']}"},
+                }
+            )
+            text_parts.append(f"\n\n[Attached image: {doc['filename']}]")
+        else:
+            context = doc["text"][:MAX_CHARS_FOR_CONTEXT]
+            truncated = len(doc["text"]) > MAX_CHARS_FOR_CONTEXT
+            note = " (truncated)" if truncated else ""
+            text_parts.append(
+                f"\n\n--- Attached document: {doc['filename']}{note} ---\n{context}\n--- end document ---"
+            )
+
+    if not image_blocks:
+        return "".join(text_parts)
+
+    return [{"type": "text", "text": "".join(text_parts)}, *image_blocks]
 
 
 # ---------- document generators ----------

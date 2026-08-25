@@ -1,617 +1,1560 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dynamic Agent Orchestrator</title>
-<!-- Fonts -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<!-- Markdown & Purify -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
-<!-- Highlight.js for code blocks -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
-<style>
-  :root {
-    --bg: #ffffff;
-    --sidebar-bg: #f7f7f8;
-    --border: #e5e5e5;
-    --text: #0d0d0d;
-    --text-dim: #6b6b6b;
-    --accent: #10a37f;
-    --accent-hover: #1a7f64;
-    --bubble-user: #f3f4f6;
-    --code-bg: #282c34;
-    --radius: 12px;
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  }
-  
-  /* Dark mode support */
-  @media (prefers-color-scheme: dark) {
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dynamic Agent Orchestrator</title>
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Markdown & Purify -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
+  <!-- Highlight.js for code blocks -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <style>
     :root {
-      --bg: #212121;
-      --sidebar-bg: #171717;
-      --border: #333333;
-      --text: #ececec;
-      --text-dim: #9b9b9b;
+      --bg: #ffffff;
+      --sidebar-bg: #f7f7f8;
+      --border: #e5e5e5;
+      --text: #0d0d0d;
+      --text-dim: #6b6b6b;
       --accent: #10a37f;
       --accent-hover: #1a7f64;
-      --bubble-user: #2f2f2f;
-      --code-bg: #1e1e1e;
+      --bubble-user: #f3f4f6;
+      --code-bg: #282c34;
+      --radius: 12px;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     }
-  }
 
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: var(--font-sans);
-    background: var(--bg);
-    color: var(--text);
-    height: 100vh;
-    overflow: hidden;
-    -webkit-font-smoothing: antialiased;
-  }
-  
-  /* Scrollbar styling */
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+    /* Dark mode support */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #212121;
+        --sidebar-bg: #171717;
+        --border: #333333;
+        --text: #ececec;
+        --text-dim: #9b9b9b;
+        --accent: #10a37f;
+        --accent-hover: #1a7f64;
+        --bubble-user: #2f2f2f;
+        --code-bg: #1e1e1e;
+      }
+    }
 
-  .app { display: flex; height: 100vh; width: 100vw; position: relative; }
+    * {
+      box-sizing: border-box;
+    }
 
-  /* ---------- Sidebar ---------- */
-  .sidebar {
-    width: 260px;
-    flex-shrink: 0;
-    background: var(--sidebar-bg);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    padding: 12px;
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), margin-left 0.3s ease;
-    z-index: 20;
-  }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 8px 20px;
-    font-weight: 600; font-size: 16px;
-    letter-spacing: -0.02em;
-  }
-  .brand-mark {
-    width: 28px; height: 28px; border-radius: 8px;
-    background: var(--accent);
-    display: flex; align-items: center; justify-content: center;
-    color: white; font-size: 14px; font-weight: 700;
-  }
-  .new-chat-btn {
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    margin-bottom: 16px;
-    transition: all 0.2s;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-  }
-  .new-chat-btn:hover { border-color: var(--text-dim); background: var(--bubble-user); }
-  .thread-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-  .thread-section-label {
-    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--text-dim); padding: 12px 8px 8px;
-  }
-  .thread-item {
-    padding: 9px 12px; border-radius: 8px; font-size: 14px; line-height: 1.4;
-    color: var(--text); cursor: pointer;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    transition: background 0.15s; flex-shrink: 0;
-  }
-  .thread-item:hover { background: var(--border); }
-  .thread-item.active { background: var(--border); font-weight: 500; }
-  .view-more-btn {
-    display: flex; align-items: center; justify-content: center;
-    padding: 8px 12px; margin: 4px 0 8px;
-    border: 1px solid var(--border); border-radius: 8px;
-    background: transparent; color: var(--text-dim);
-    font-size: 12.5px; font-weight: 500; font-family: inherit;
-    cursor: pointer; width: 100%; transition: all 0.15s ease;
-    flex-shrink: 0;
-  }
-  .view-more-btn:hover { background: var(--border); color: var(--text); }
-  .sidebar-footer {
-    font-size: 12px; color: var(--text-dim);
-    padding: 16px 8px 8px; border-top: 1px solid var(--border);
-    text-align: center;
-  }
+    body {
+      margin: 0;
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
 
-  /* ---------- Main ---------- */
-  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
-  .topbar {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 16px; flex-shrink: 0;
-    position: absolute; top: 0; left: 0; z-index: 10;
-  }
-  .icon-btn {
-    width: 36px; height: 36px; border-radius: 8px; border: none;
-    background: transparent; cursor: pointer; color: var(--text-dim);
-    display: flex; align-items: center; justify-content: center;
-    transition: background 0.2s;
-  }
-  .icon-btn:hover { background: var(--border); color: var(--text); }
-  .icon-btn svg { width: 20px; height: 20px; fill: currentColor; }
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
 
-  /* Landing / empty state */
-  .landing {
-    flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; padding: 24px;
-  }
-  .landing h1 {
-    font-size: 32px; font-weight: 600; margin: 0 0 32px;
-    color: var(--text); letter-spacing: -0.02em;
-  }
-  .landing .accent-dot { color: var(--accent); }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
 
-  /* Message list */
-  .messages {
-    flex: 1; overflow-y: auto;
-    display: none;
-    flex-direction: column;
-    align-items: center;
-    padding-top: 60px; /* space for topbar */
-  }
-  .messages.active { display: flex; }
-  .messages-inner { width: 100%; max-width: 800px; padding: 0 20px 24px; }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
 
-  .msg { display: flex; gap: 16px; margin-bottom: 32px; width: 100%; }
-  .msg.user { justify-content: flex-end; }
-  .avatar {
-    width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
-    background: var(--accent); color: white;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 14px; font-weight: 600;
-  }
-  .msg-body { max-width: 85%; min-width: 0; }
-  .msg.user .msg-body {
-    background: var(--bubble-user);
-    padding: 12px 18px;
-    border-radius: 18px;
-    border-bottom-right-radius: 4px;
-  }
-  .msg.assistant .msg-body { padding-top: 4px; max-width: 100%; }
-  .msg-content { font-size: 15px; line-height: 1.6; word-wrap: break-word; color: var(--text); }
-  .msg-content p { margin: 0 0 16px; }
-  .msg-content p:last-child { margin-bottom: 0; }
-  .msg-content code {
-    background: var(--border); padding: 3px 6px; border-radius: 6px;
-    font-size: 13.5px; font-family: "SF Mono", Menlo, Consolas, monospace;
-  }
-  .msg-content pre {
-    background: var(--code-bg); color: #abb2bf;
-    padding: 16px; border-radius: 12px; overflow-x: auto;
-    font-size: 14px; line-height: 1.5; margin: 16px 0;
-  }
-  .msg-content pre code { background: transparent; padding: 0; border-radius: 0; color: inherit; }
-  .msg-content ul, .msg-content ol { margin: 0 0 16px; padding-left: 24px; }
-  .msg-content li { margin-bottom: 4px; }
-  .msg-content a { color: var(--accent); text-decoration: none; }
-  .msg-content a:hover { text-decoration: underline; }
-  .msg-content blockquote {
-    border-left: 4px solid var(--border); margin: 16px 0; padding-left: 16px; color: var(--text-dim);
-  }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-dim);
+    }
 
-  /* Step / plan disclosure */
-  .steps-block {
-    border: 1px solid var(--border); border-radius: 12px;
-    margin-bottom: 16px; overflow: hidden; font-size: 14px;
-    background: var(--bg);
-  }
-  .steps-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px; cursor: pointer; user-select: none;
-    color: var(--text-dim); background: var(--sidebar-bg);
-    font-weight: 500; transition: background 0.2s;
-  }
-  .steps-header:hover { background: var(--border); }
-  .steps-header svg { width: 14px; height: 14px; transition: transform 0.2s ease; fill: currentColor; }
-  .steps-header.open svg { transform: rotate(90deg); }
-  .steps-body { display: none; padding: 8px 16px 16px; }
-  .steps-body.open { display: block; }
-  .step-row {
-    display: flex; align-items: flex-start; gap: 10px;
-    padding: 8px 0; font-size: 13.5px; color: var(--text);
-    border-bottom: 1px solid var(--border);
-  }
-  .step-row:last-child { border-bottom: none; padding-bottom: 0; }
-  .step-role {
-    background: var(--border); color: var(--text-dim);
-    font-size: 12px; padding: 2px 8px; border-radius: 6px; flex-shrink: 0;
-    margin-top: 2px; font-family: "SF Mono", Menlo, monospace; font-weight: 500;
-  }
-  .step-status { padding: 8px 0; font-size: 13.5px; color: var(--text-dim); }
-  .step-status.retry { color: #d97757; }
-  .step-status.pass { color: var(--accent); }
-  .step-status.pass::before { content: "✓ "; font-weight: bold; }
+    .app {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+      position: relative;
+    }
 
-  .typing-dots { display: flex; gap: 5px; padding: 8px 0; align-items: center; height: 24px; }
-  .typing-dots span {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim);
-    animation: bounce 1.4s infinite ease-in-out both;
-  }
-  .typing-dots span:nth-child(1) { animation-delay: -0.32s; }
-  .typing-dots span:nth-child(2) { animation-delay: -0.16s; }
-  @keyframes bounce { 0%, 80%, 100% { transform: scale(0); opacity: 0.5; } 40% { transform: scale(1); opacity: 1; } }
-
-  /* Input area */
-  .input-area { width: 100%; display: flex; justify-content: center; padding: 16px 20px 24px; flex-shrink: 0; background: linear-gradient(to top, var(--bg) 80%, transparent); }
-  .input-box {
-    width: 100%; max-width: 800px;
-    background: var(--sidebar-bg);
-    border: 1px solid var(--border);
-    border-radius: 24px;
-    padding: 12px 14px 12px 20px;
-    display: flex; align-items: flex-end; gap: 10px;
-    transition: all 0.2s;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.02);
-  }
-  .input-box:focus-within { border-color: var(--accent); background: var(--bg); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-  textarea#goal-input, textarea#goal-input-landing {
-    flex: 1; border: none; outline: none; resize: none;
-    font-family: inherit; font-size: 15.5px; line-height: 1.5;
-    max-height: 200px; background: transparent; color: var(--text);
-    padding: 4px 0;
-  }
-  textarea::placeholder { color: var(--text-dim); }
-  .send-btn {
-    width: 36px; height: 36px; border-radius: 50%; border: none;
-    background: var(--accent); color: white; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; transition: all 0.2s;
-  }
-  .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
-  .send-btn:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
-  .send-btn:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; }
-  .hint { text-align: center; font-size: 12px; color: var(--text-dim); margin-top: 12px; font-weight: 500; }
-
-  /* Document attach */
-  .attach-btn {
-    width: 36px; height: 36px; border-radius: 50%; border: none;
-    background: transparent; color: var(--text-dim); cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; transition: all 0.2s;
-  }
-  .attach-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
-  .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .attach-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
-  .doc-chip {
-    display: none; align-items: center; gap: 8px;
-    max-width: 800px; margin: 0 auto 8px; padding: 8px 12px;
-    border: 1px solid var(--border); border-radius: 10px;
-    background: var(--sidebar-bg); font-size: 13px; color: var(--text);
-  }
-  .doc-chip.active { display: flex; }
-  .doc-chip svg { width: 15px; height: 15px; fill: none; stroke: var(--accent); stroke-width: 2; flex-shrink: 0; }
-  .doc-chip .doc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .doc-chip .doc-remove { cursor: pointer; color: var(--text-dim); background: none; border: none; font-size: 15px; line-height: 1; padding: 2px 4px; }
-  .doc-chip .doc-remove:hover { color: var(--text); }
-
-  /* Mobile responsiveness */
-  @media (max-width: 768px) {
+    /* ---------- Sidebar ---------- */
     .sidebar {
-      position: absolute; top: 0; left: 0; height: 100%;
-      transform: translateX(-100%);
-      box-shadow: 4px 0 24px rgba(0,0,0,0.1);
+      width: 260px;
+      flex-shrink: 0;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), margin-left 0.3s ease;
+      z-index: 20;
     }
-    .sidebar.open { transform: translateX(0); }
-    .sidebar-overlay {
-      display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.4); z-index: 15; backdrop-filter: blur(2px);
-      opacity: 0; transition: opacity 0.3s;
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 8px 20px;
+      font-weight: 600;
+      font-size: 16px;
+      letter-spacing: -0.02em;
     }
-    .sidebar-overlay.active { display: block; opacity: 1; }
-    .msg { flex-direction: column; gap: 8px; }
-    .msg.user .msg-body { max-width: 90%; }
-    .msg.assistant { flex-direction: row; }
-  }
-</style>
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .new-chat-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 16px;
+      transition: all 0.2s;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+
+    .new-chat-btn:hover {
+      border-color: var(--text-dim);
+      background: var(--bubble-user);
+    }
+
+    .thread-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .thread-section-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-dim);
+      padding: 12px 8px 8px;
+    }
+
+    .thread-item {
+      padding: 9px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.4;
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+
+    .thread-item:hover {
+      background: var(--border);
+    }
+
+    .thread-item.active {
+      background: var(--border);
+      font-weight: 500;
+    }
+
+    .view-more-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 12px;
+      margin: 4px 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 12.5px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      width: 100%;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .view-more-btn:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .sidebar-footer {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 16px 8px 8px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+
+    /* ---------- Main ---------- */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      position: relative;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      flex-shrink: 0;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 10;
+    }
+
+    .icon-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+    }
+
+    .icon-btn:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .icon-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+
+    /* Landing / empty state */
+    .landing {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .landing h1 {
+      font-size: 32px;
+      font-weight: 600;
+      margin: 0 0 32px;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+
+    .landing .accent-dot {
+      color: var(--accent);
+    }
+
+    /* Message list */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 60px;
+      /* space for topbar */
+    }
+
+    .messages.active {
+      display: flex;
+    }
+
+    .messages-inner {
+      width: 100%;
+      max-width: 800px;
+      padding: 0 20px 24px;
+    }
+
+    .msg {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 32px;
+      width: 100%;
+    }
+
+    .msg.user {
+      justify-content: flex-end;
+    }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      flex-shrink: 0;
+      background: var(--accent);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .msg-body {
+      max-width: 85%;
+      min-width: 0;
+    }
+
+    .msg.user .msg-body {
+      background: var(--bubble-user);
+      padding: 12px 18px;
+      border-radius: 18px;
+      border-bottom-right-radius: 4px;
+    }
+
+    .msg.assistant .msg-body {
+      padding-top: 4px;
+      max-width: 100%;
+    }
+
+    .msg-content {
+      font-size: 15px;
+      line-height: 1.6;
+      word-wrap: break-word;
+      color: var(--text);
+    }
+
+    .msg-content p {
+      margin: 0 0 16px;
+    }
+
+    .msg-content p:last-child {
+      margin-bottom: 0;
+    }
+
+    .msg-content code {
+      background: var(--border);
+      padding: 3px 6px;
+      border-radius: 6px;
+      font-size: 13.5px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    .msg-content pre {
+      background: var(--code-bg);
+      color: #abb2bf;
+      padding: 16px;
+      border-radius: 12px;
+      overflow-x: auto;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 16px 0;
+    }
+
+    .msg-content pre code {
+      background: transparent;
+      padding: 0;
+      border-radius: 0;
+      color: inherit;
+    }
+
+    .msg-content ul,
+    .msg-content ol {
+      margin: 0 0 16px;
+      padding-left: 24px;
+    }
+
+    .msg-content li {
+      margin-bottom: 4px;
+    }
+
+    .msg-content a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .msg-content a:hover {
+      text-decoration: underline;
+    }
+
+    .msg-content blockquote {
+      border-left: 4px solid var(--border);
+      margin: 16px 0;
+      padding-left: 16px;
+      color: var(--text-dim);
+    }
+
+    /* Step / plan disclosure */
+    .steps-block {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 16px;
+      overflow: hidden;
+      font-size: 14px;
+      background: var(--bg);
+    }
+
+    .steps-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      cursor: pointer;
+      user-select: none;
+      color: var(--text-dim);
+      background: var(--sidebar-bg);
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+
+    .steps-header:hover {
+      background: var(--border);
+    }
+
+    .steps-header svg {
+      width: 14px;
+      height: 14px;
+      transition: transform 0.2s ease;
+      fill: currentColor;
+    }
+
+    .steps-header.open svg {
+      transform: rotate(90deg);
+    }
+
+    .steps-body {
+      display: none;
+      padding: 8px 16px 16px;
+    }
+
+    .steps-body.open {
+      display: block;
+    }
+
+    .step-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 0;
+      font-size: 13.5px;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .step-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .step-role {
+      background: var(--border);
+      color: var(--text-dim);
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      flex-shrink: 0;
+      margin-top: 2px;
+      font-family: "SF Mono", Menlo, monospace;
+      font-weight: 500;
+    }
+
+    .step-status {
+      padding: 8px 0;
+      font-size: 13.5px;
+      color: var(--text-dim);
+    }
+
+    .step-status.retry {
+      color: #d97757;
+    }
+
+    .step-status.pass {
+      color: var(--accent);
+    }
+
+    .step-status.pass::before {
+      content: "✓ ";
+      font-weight: bold;
+    }
+
+    .typing-dots {
+      display: flex;
+      gap: 5px;
+      padding: 8px 0;
+      align-items: center;
+      height: 24px;
+    }
+
+    .typing-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      animation: bounce 1.4s infinite ease-in-out both;
+    }
+
+    .typing-dots span:nth-child(1) {
+      animation-delay: -0.32s;
+    }
+
+    .typing-dots span:nth-child(2) {
+      animation-delay: -0.16s;
+    }
+
+    @keyframes bounce {
+
+      0%,
+      80%,
+      100% {
+        transform: scale(0);
+        opacity: 0.5;
+      }
+
+      40% {
+        transform: scale(1);
+        opacity: 1;
+      }
+    }
+
+    /* Input area */
+    .input-area {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      padding: 16px 20px 24px;
+      flex-shrink: 0;
+      background: linear-gradient(to top, var(--bg) 80%, transparent);
+    }
+
+    .input-box {
+      width: 100%;
+      max-width: 800px;
+      background: var(--sidebar-bg);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 12px 14px 12px 20px;
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      transition: all 0.2s;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+    }
+
+    .input-box:focus-within {
+      border-color: var(--accent);
+      background: var(--bg);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    }
+
+    textarea#goal-input,
+    textarea#goal-input-landing {
+      flex: 1;
+      border: none;
+      outline: none;
+      resize: none;
+      font-family: inherit;
+      font-size: 15.5px;
+      line-height: 1.5;
+      max-height: 200px;
+      background: transparent;
+      color: var(--text);
+      padding: 4px 0;
+    }
+
+    textarea::placeholder {
+      color: var(--text-dim);
+    }
+
+    .send-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .send-btn svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    .send-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    .send-btn:disabled {
+      background: var(--border);
+      color: var(--text-dim);
+      cursor: not-allowed;
+    }
+
+    .hint {
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 12px;
+      font-weight: 500;
+    }
+
+    /* Document attach */
+    .attach-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .attach-btn:hover:not(:disabled) {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .attach-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .attach-btn svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+    }
+
+    .doc-chip {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      max-width: 800px;
+      margin: 0 auto 8px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--sidebar-bg);
+      font-size: 13px;
+      color: var(--text);
+    }
+
+    .doc-chip.active {
+      display: flex;
+    }
+
+    .doc-chip svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 2;
+      flex-shrink: 0;
+    }
+
+    .doc-chip .doc-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .doc-chip .doc-remove {
+      cursor: pointer;
+      color: var(--text-dim);
+      background: none;
+      border: none;
+      font-size: 15px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+
+    .doc-chip .doc-remove:hover {
+      color: var(--text);
+    }
+
+    /* Workdir (Cowork-style working directory) chip in the topbar */
+    .workdir-chip {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text-dim);
+      font-size: 12.5px;
+      cursor: pointer;
+      max-width: 280px;
+      transition: all 0.15s;
+    }
+
+    .workdir-chip.active {
+      display: flex;
+    }
+
+    .workdir-chip:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    .workdir-chip svg {
+      width: 14px;
+      height: 14px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      flex-shrink: 0;
+    }
+
+    .workdir-chip-path {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Working-directory picker modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(2px);
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal {
+      width: 100%;
+      max-width: 520px;
+      max-height: 78vh;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .modal-header h3 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .modal-body {
+      padding: 16px 20px;
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .modal-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .workdir-path-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .workdir-path-row input {
+      flex: 1;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text);
+      font-size: 13.5px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      outline: none;
+    }
+
+    .workdir-path-row input:focus {
+      border-color: var(--accent);
+    }
+
+    .workdir-path-row button {
+      padding: 9px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text);
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .workdir-path-row button:hover {
+      background: var(--border);
+    }
+
+    .workdir-breadcrumbs {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+      word-break: break-all;
+      line-height: 1.6;
+    }
+
+    .workdir-breadcrumbs .crumb {
+      cursor: pointer;
+    }
+
+    .workdir-breadcrumbs .crumb:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    .workdir-breadcrumbs .crumb-sep {
+      padding: 0 2px;
+    }
+
+    .workdir-list {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .workdir-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.15s;
+    }
+
+    .workdir-item:last-child {
+      border-bottom: none;
+    }
+
+    .workdir-item:hover {
+      background: var(--sidebar-bg);
+    }
+
+    .workdir-item .folder-icon {
+      flex-shrink: 0;
+      opacity: 0.8;
+    }
+
+    .workdir-loading,
+    .workdir-empty {
+      padding: 20px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13.5px;
+    }
+
+    .modal-btn-primary {
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .modal-btn-primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .modal-btn-secondary {
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .modal-btn-secondary:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+
+    /* Mobile responsiveness */
+    @media (max-width: 768px) {
+      .sidebar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        transform: translateX(-100%);
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.1);
+      }
+
+      .sidebar.open {
+        transform: translateX(0);
+      }
+
+      .sidebar-overlay {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 15;
+        backdrop-filter: blur(2px);
+        opacity: 0;
+        transition: opacity 0.3s;
+      }
+
+      .sidebar-overlay.active {
+        display: block;
+        opacity: 1;
+      }
+
+      .msg {
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .msg.user .msg-body {
+        max-width: 90%;
+      }
+
+      .msg.assistant {
+        flex-direction: row;
+      }
+    }
+  </style>
 </head>
+
 <body>
 
-<div class="app">
-  <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
-  <div class="sidebar" id="sidebar">
-    <div class="brand"><div class="brand-mark">O</div> Orchestrator</div>
-    <button class="new-chat-btn" onclick="newChat()">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-      New chat
-    </button>
-    <div class="thread-list" id="thread-list">
-      <div class="thread-section-label">Recents</div>
-    </div>
-    <div class="sidebar-footer">Dynamic multi-agent orchestrator</div>
-  </div>
-
-  <div class="main">
-    <div class="topbar">
-      <button class="icon-btn" onclick="toggleSidebar()" title="Toggle sidebar">
-        <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
-      </button>
-    </div>
-
-    <input type="file" id="doc-file-input" accept=".pdf,.docx,.txt,.csv,.xlsx" style="display:none;" onchange="handleFileSelected(event)">
-
-    <div class="landing" id="landing">
-      <h1>What's your <span class="accent-dot">goal</span> today?</h1>
-      <div class="doc-chip" id="doc-chip-landing"></div>
-      <div class="input-box" style="max-width:700px; width:100%;">
-        <button class="attach-btn" id="attach-btn-landing" onclick="triggerFileSelect()" title="Attach a document (PDF, DOCX, TXT, CSV, XLSX)">
-          <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-        </button>
-        <textarea id="goal-input-landing" placeholder="Describe what you want done..." rows="1"
-          onkeydown="handleKeydown(event, true)" oninput="autoGrow(this)"></textarea>
-        <button class="send-btn" onclick="sendFrom(true)">
-          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
+  <div class="app">
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+    <div class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">O</div> Orchestrator
       </div>
+      <button class="new-chat-btn" onclick="newChat()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        New chat
+      </button>
+      <div class="thread-list" id="thread-list">
+        <div class="thread-section-label">Recents</div>
+      </div>
+      <div class="sidebar-footer">Dynamic multi-agent orchestrator</div>
     </div>
 
-    <div class="messages" id="messages">
-      <div class="messages-inner" id="messages-inner"></div>
-    </div>
+    <div class="main">
+      <div class="topbar">
+        <button class="icon-btn" onclick="toggleSidebar()" title="Toggle sidebar">
+          <svg viewBox="0 0 24 24">
+            <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="workdir-btn" onclick="openWorkdirModal()"
+          title="Give the agent access to a local folder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          </svg>
+        </button>
+        <div class="workdir-chip" id="workdir-chip" onclick="openWorkdirModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          </svg>
+          <span class="workdir-chip-path" id="workdir-chip-path"></span>
+        </div>
+      </div>
 
-    <div class="input-area" id="input-area" style="display:none;">
-      <div style="width:100%; max-width:800px;">
-        <div class="doc-chip" id="doc-chip-chat"></div>
-        <div class="input-box">
-          <button class="attach-btn" id="attach-btn-chat" onclick="triggerFileSelect()" title="Attach a document (PDF, DOCX, TXT, CSV, XLSX)">
-            <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      <!-- Local working-directory picker modal: lets the agent's
+           read_file/write_file/list_directory/view_image tools operate on
+           a real folder on disk, alongside (not instead of) one-off
+           uploaded-file attachments handled by doc-file-input below. -->
+      <div class="modal-overlay" id="workdir-modal-overlay" onclick="if (event.target === this) closeWorkdirModal()">
+        <div class="modal">
+          <div class="modal-header">
+            <h3>Local folder access</h3>
+            <button class="icon-btn" onclick="closeWorkdirModal()" title="Close">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="workdir-path-row">
+              <input type="text" id="workdir-path-input" placeholder="/path/to/folder"
+                onkeydown="if (event.key === 'Enter') { event.preventDefault(); browseWorkdir(document.getElementById('workdir-path-input').value); }">
+              <button onclick="browseWorkdir(document.getElementById('workdir-path-input').value)">Go</button>
+            </div>
+            <div class="workdir-breadcrumbs" id="workdir-breadcrumbs"></div>
+            <div class="workdir-list" id="workdir-list">
+              <div class="workdir-empty">Type a folder path above and press "Go" to browse it.</div>
+            </div>
+            <div id="workdir-error" style="display:none; color:var(--accent); font-size:13px; margin-top:10px;"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-btn-secondary" id="workdir-clear-btn" onclick="clearWorkdirSelection()"
+              style="display:none;">Remove folder access</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn-secondary" onclick="closeWorkdirModal()">Cancel</button>
+            <button class="modal-btn-primary" id="workdir-use-btn" onclick="useThisFolder()" disabled>Use this
+              folder</button>
+          </div>
+        </div>
+      </div>
+
+      <input type="file" id="doc-file-input" accept=".pdf,.docx,.txt,.csv,.xlsx,.png,.jpg,.jpeg,.gif,.webp"
+        style="display:none;" onchange="handleFileSelected(event)">
+
+      <div class="landing" id="landing">
+        <h1>What's your <span class="accent-dot">goal</span> today?</h1>
+        <div class="doc-chip" id="doc-chip-landing"></div>
+        <div class="input-box" style="max-width:700px; width:100%;">
+          <button class="attach-btn" id="attach-btn-landing" onclick="triggerFileSelect()"
+            title="Attach a file (PDF, DOCX, TXT, CSV, XLSX, or an image)">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
           </button>
-          <textarea id="goal-input" placeholder="Message Orchestrator..." rows="1"
-            onkeydown="handleKeydown(event, false)" oninput="autoGrow(this)"></textarea>
-          <button class="send-btn" id="send-btn" onclick="sendFrom(false)">
-            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          <textarea id="goal-input-landing" placeholder="Describe what you want done..." rows="1"
+            onkeydown="handleKeydown(event, true)" oninput="autoGrow(this)"></textarea>
+          <button class="send-btn" onclick="sendFrom(true)">
+            <svg viewBox="0 0 24 24">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+            </svg>
           </button>
         </div>
-        <div class="hint" id="input-hint">The agent may create new agents or tools automatically to complete this goal.</div>
+      </div>
+
+      <div class="messages" id="messages">
+        <div class="messages-inner" id="messages-inner"></div>
+      </div>
+
+      <div class="input-area" id="input-area" style="display:none;">
+        <div style="width:100%; max-width:800px;">
+          <div class="doc-chip" id="doc-chip-chat"></div>
+          <div class="input-box">
+            <button class="attach-btn" id="attach-btn-chat" onclick="triggerFileSelect()"
+              title="Attach a file (PDF, DOCX, TXT, CSV, XLSX, or an image)">
+              <svg viewBox="0 0 24 24">
+                <path
+                  d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
+            <textarea id="goal-input" placeholder="Message Orchestrator..." rows="1"
+              onkeydown="handleKeydown(event, false)" oninput="autoGrow(this)"></textarea>
+            <button class="send-btn" id="send-btn" onclick="sendFrom(false)">
+              <svg viewBox="0 0 24 24">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+              </svg>
+            </button>
+          </div>
+          <div class="hint" id="input-hint">The agent may create new agents or tools automatically to complete this
+            goal.</div>
+        </div>
       </div>
     </div>
   </div>
-</div>
 
-<script>
-const API_BASE = ""; // same origin
-let threadId = null;
-let threads = JSON.parse(localStorage.getItem('threads') || '[]');
-let busy = false;
-let showAllThreads = false;
-let attachedDoc = null; // { doc_id, filename }
+  <script>
+    const API_BASE = ""; // same origin
+    let threadId = null;
+    let threads = JSON.parse(localStorage.getItem('threads') || '[]');
+    let busy = false;
+    let showAllThreads = false;
+    let attachedDoc = null; // { doc_id, filename }
 
-function triggerFileSelect() {
-  if (busy) return;
-  document.getElementById('doc-file-input').click();
-}
+    // ---------- local folder (workdir) access ----------
+    // Separate from attachedDoc above: a one-shot uploaded file is folded
+    // into a single message, while a workdir gives the agent's
+    // read_file/write_file/list_directory/view_image tools standing access
+    // to a real folder on disk for as long as the thread is active.
+    let activeWorkdir = null;     // path currently in effect for `threadId`, or null
+    let pendingWorkdir = null;    // chosen before threadId exists (new chat) -- sent with the first message
+    let workdirBrowsePath = '';   // path currently shown in the picker modal
+    let workdirsByThread = JSON.parse(localStorage.getItem('workdirsByThread') || '{}');
 
-async function handleFileSelected(e) {
-  const file = e.target.files[0];
-  e.target.value = ''; // allow re-selecting the same file later
-  if (!file) return;
-
-  renderDocChip({ filename: file.name, uploading: true });
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  try {
-    const res = await fetch(`${API_BASE}/documents/upload`, { method: 'POST', body: formData });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Upload failed');
+    function openWorkdirModal() {
+      if (busy) return;
+      document.getElementById('workdir-modal-overlay').classList.add('active');
+      document.getElementById('workdir-clear-btn').style.display = (activeWorkdir || pendingWorkdir) ? '' : 'none';
+      const startPath = activeWorkdir || pendingWorkdir || '';
+      document.getElementById('workdir-path-input').value = startPath;
+      document.getElementById('workdir-error').style.display = 'none';
+      if (startPath) {
+        browseWorkdir(startPath);
+      } else {
+        workdirBrowsePath = '';
+        document.getElementById('workdir-breadcrumbs').innerHTML = '';
+        document.getElementById('workdir-list').innerHTML =
+          '<div class="workdir-empty">Type a folder path above and press "Go" to browse it.</div>';
+        document.getElementById('workdir-use-btn').disabled = true;
+      }
     }
-    const data = await res.json();
-    attachedDoc = { doc_id: data.doc_id, filename: data.filename };
-    renderDocChip(attachedDoc);
-    updateInputModeForDoc();
-  } catch (err) {
-    attachedDoc = null;
-    renderDocChip(null);
-    alert(err.message || 'Could not process that file.');
-  }
-}
 
-function removeAttachedDoc() {
-  attachedDoc = null;
-  renderDocChip(null);
-  updateInputModeForDoc();
-}
+    function closeWorkdirModal() {
+      document.getElementById('workdir-modal-overlay').classList.remove('active');
+    }
 
-function renderDocChip(doc) {
-  const isLanding = document.getElementById('landing').style.display !== 'none';
-  const chip = document.getElementById(isLanding ? 'doc-chip-landing' : 'doc-chip-chat');
-  const other = document.getElementById(isLanding ? 'doc-chip-chat' : 'doc-chip-landing');
-  [chip, other].forEach(c => { c.classList.remove('active'); c.innerHTML = ''; });
-  if (!doc) return;
-  chip.classList.add('active');
-  chip.innerHTML = `
+    function showWorkdirError(msg) {
+      const el = document.getElementById('workdir-error');
+      el.textContent = msg;
+      el.style.display = msg ? 'block' : 'none';
+    }
+
+    async function browseWorkdir(path) {
+      const list = document.getElementById('workdir-list');
+      const useBtn = document.getElementById('workdir-use-btn');
+      showWorkdirError('');
+      list.innerHTML = '<div class="workdir-loading">Loading…</div>';
+      useBtn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/fs/browse?path=${encodeURIComponent(path || '')}`);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || err.error || `Can't open that folder (${res.status}).`);
+        }
+        const data = await res.json();
+        workdirBrowsePath = data.path || path || '';
+        document.getElementById('workdir-path-input').value = workdirBrowsePath;
+        renderWorkdirBreadcrumbs(workdirBrowsePath);
+        const dirs = (data.entries || []).filter(e => e.is_dir);
+        if (dirs.length === 0) {
+          list.innerHTML = '<div class="workdir-empty">No subfolders here.</div>';
+        } else {
+          list.innerHTML = '';
+          dirs.forEach(entry => {
+            const row = document.createElement('div');
+            row.className = 'workdir-item';
+            row.innerHTML = `<svg class="folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>${escapeHtml(entry.name)}</span>`;
+            row.onclick = () => browseWorkdir(entry.path);
+            list.appendChild(row);
+          });
+        }
+        useBtn.disabled = false;
+      } catch (err) {
+        list.innerHTML = '<div class="workdir-empty">Couldn\'t browse — you can still type an exact path above and select "Use this folder".</div>';
+        // Browsing failing (e.g. no /fs/browse route) shouldn't block picking
+        // a path outright -- the path still gets validated server-side when used.
+        workdirBrowsePath = path || '';
+        useBtn.disabled = !workdirBrowsePath;
+      }
+    }
+
+    function renderWorkdirBreadcrumbs(path) {
+      const el = document.getElementById('workdir-breadcrumbs');
+      const parts = path.split('/').filter(Boolean);
+      let acc = path.startsWith('/') ? '' : '';
+      const crumbs = [];
+      if (path.startsWith('/')) {
+        crumbs.push({ label: '/', path: '/' });
+      }
+      parts.forEach((part, i) => {
+        acc = (path.startsWith('/') ? '/' : '') + parts.slice(0, i + 1).join('/');
+        crumbs.push({ label: part, path: acc });
+      });
+      el.innerHTML = crumbs.map((c, i) =>
+        `<span class="crumb" onclick="browseWorkdir('${c.path.replace(/'/g, "\\'")}')">${escapeHtml(c.label)}</span>${i < crumbs.length - 1 ? '<span class="crumb-sep">/</span>' : ''}`
+      ).join('');
+    }
+
+    async function useThisFolder() {
+      const path = (document.getElementById('workdir-path-input').value || workdirBrowsePath || '').trim();
+      if (!path) return;
+
+      if (!threadId) {
+        // No thread yet (new chat) -- can't validate server-side until one
+        // exists, so stage it locally and send it with the first message.
+        pendingWorkdir = path;
+        applyWorkdirChip(path);
+        closeWorkdirModal();
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/workdir`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ thread_id: threadId, path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+          throw new Error(data.error || data.detail || 'Could not set that folder.');
+        }
+        activeWorkdir = data.workdir || path;
+        pendingWorkdir = null;
+        workdirsByThread[threadId] = activeWorkdir;
+        localStorage.setItem('workdirsByThread', JSON.stringify(workdirsByThread));
+        applyWorkdirChip(activeWorkdir);
+        closeWorkdirModal();
+      } catch (err) {
+        showWorkdirError(err.message || 'Could not set that folder.');
+      }
+    }
+
+    async function clearWorkdirSelection() {
+      pendingWorkdir = null;
+      const prevThreadId = threadId;
+      activeWorkdir = null;
+      applyWorkdirChip(null);
+      closeWorkdirModal();
+      if (prevThreadId) {
+        delete workdirsByThread[prevThreadId];
+        localStorage.setItem('workdirsByThread', JSON.stringify(workdirsByThread));
+        try {
+          await fetch(`${API_BASE}/workdir?thread_id=${encodeURIComponent(prevThreadId)}`, { method: 'DELETE' });
+        } catch (e) {
+          // best-effort -- the thread just falls back to the default workspace either way
+        }
+      }
+    }
+
+    function applyWorkdirChip(path) {
+      const chip = document.getElementById('workdir-chip');
+      const chipPath = document.getElementById('workdir-chip-path');
+      const btn = document.getElementById('workdir-btn');
+      if (path) {
+        chip.classList.add('active');
+        chipPath.textContent = path;
+        chip.title = `Agent has access to: ${path} (click to change)`;
+        if (btn) btn.style.display = 'none';
+      } else {
+        chip.classList.remove('active');
+        chipPath.textContent = '';
+        if (btn) btn.style.display = '';
+      }
+    }
+
+    async function loadWorkdirForThread(id) {
+      activeWorkdir = null;
+      pendingWorkdir = null;
+      // Show the locally cached value immediately (best-effort UI), then
+      // reconcile with the server if it exposes a lookup route.
+      applyWorkdirChip(workdirsByThread[id] || null);
+      try {
+        const res = await fetch(`${API_BASE}/workdir?thread_id=${encodeURIComponent(id)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.workdir && !data.is_default) {
+          activeWorkdir = data.workdir;
+          workdirsByThread[id] = data.workdir;
+          localStorage.setItem('workdirsByThread', JSON.stringify(workdirsByThread));
+          applyWorkdirChip(data.workdir);
+        } else {
+          delete workdirsByThread[id];
+          localStorage.setItem('workdirsByThread', JSON.stringify(workdirsByThread));
+          applyWorkdirChip(null);
+        }
+      } catch (e) {
+        // no /workdir GET route available server-side -- keep showing the cached guess
+      }
+    }
+
+    function triggerFileSelect() {
+      if (busy) return;
+      document.getElementById('doc-file-input').click();
+    }
+
+    async function handleFileSelected(e) {
+      const file = e.target.files[0];
+      e.target.value = ''; // allow re-selecting the same file later
+      if (!file) return;
+
+      renderDocChip({ filename: file.name, uploading: true });
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const res = await fetch(`${API_BASE}/documents/upload`, { method: 'POST', body: formData });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || 'Upload failed');
+        }
+        const data = await res.json();
+        attachedDoc = { doc_id: data.doc_id, filename: data.filename };
+        renderDocChip(attachedDoc);
+        updateInputModeForDoc();
+      } catch (err) {
+        attachedDoc = null;
+        renderDocChip(null);
+        alert(err.message || 'Could not process that file.');
+      }
+    }
+
+    function removeAttachedDoc() {
+      attachedDoc = null;
+      renderDocChip(null);
+      updateInputModeForDoc();
+    }
+
+    function renderDocChip(doc) {
+      const isLanding = document.getElementById('landing').style.display !== 'none';
+      const chip = document.getElementById(isLanding ? 'doc-chip-landing' : 'doc-chip-chat');
+      const other = document.getElementById(isLanding ? 'doc-chip-chat' : 'doc-chip-landing');
+      [chip, other].forEach(c => { c.classList.remove('active'); c.innerHTML = ''; });
+      if (!doc) return;
+      chip.classList.add('active');
+      chip.innerHTML = `
     <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
     <span class="doc-name">${escapeHtml(doc.filename)}${doc.uploading ? ' — uploading…' : ''}</span>
     ${doc.uploading ? '' : '<button class="doc-remove" onclick="removeAttachedDoc()" title="Remove">×</button>'}`;
-}
-
-function updateInputModeForDoc() {
-  const hint = document.getElementById('input-hint');
-  if (!hint) return;
-  hint.textContent = attachedDoc
-    ? `"${attachedDoc.filename}" will be included with your next message.`
-    : 'The agent may create new agents or tools automatically to complete this goal.';
-}
-
-async function loadThreadsFromServer() {
-  try {
-    const res = await fetch(`${API_BASE}/threads`);
-    const data = await res.json();
-    threads = (data.threads || []).map(t => ({
-      id: t.thread_id,
-      title: t.title || '(untitled chat)',
-    }));
-    localStorage.setItem('threads', JSON.stringify(threads));
-  } catch (e) {
-    // backend unreachable — fall back to whatever was cached locally
-  }
-  renderThreadList();
-}
-
-// Configure Marked to use Highlight.js
-marked.setOptions({
-  breaks: true,
-  highlight: function(code, lang) {
-    const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-    return hljs.highlight(code, { language }).value;
-  }
-});
-
-function renderThreadList() {
-  const list = document.getElementById('thread-list');
-  list.innerHTML = '<div class="thread-section-label">Recents</div>';
-  if (!threads || threads.length === 0) {
-    list.innerHTML += '<div class="thread-item" style="color:var(--text-dim); pointer-events:none;">No recent chats</div>';
-    return;
-  }
-
-  const visibleThreads = showAllThreads ? threads : threads.slice(0, 10);
-  visibleThreads.forEach(t => {
-    const el = document.createElement('div');
-    el.className = 'thread-item' + (t.id === threadId ? ' active' : '');
-    el.textContent = t.title;
-    el.onclick = () => switchThread(t.id);
-    list.appendChild(el);
-  });
-
-  if (threads.length > 10) {
-    const btn = document.createElement('button');
-    btn.className = 'view-more-btn';
-    btn.textContent = showAllThreads ? 'Show less' : `View more (${threads.length - 10} more)`;
-    btn.onclick = () => {
-      showAllThreads = !showAllThreads;
-      renderThreadList();
-    };
-    list.appendChild(btn);
-  }
-}
-
-async function switchThread(id) {
-  if (busy) return;
-  threadId = id;
-  document.getElementById('messages-inner').innerHTML = '';
-  showChatView();
-  renderThreadList();
-  if (window.innerWidth <= 768) closeSidebar();
-
-  try {
-    const res = await fetch(`${API_BASE}/thread/${encodeURIComponent(id)}/messages`);
-    const data = await res.json();
-    (data.messages || []).forEach(m => {
-      if (m.role === 'human') {
-        addUserMessage(m.content);
-      } else if (m.role === 'ai' && m.content && m.content.trim()) {
-        const div = document.createElement('div');
-        div.className = 'msg assistant';
-        div.innerHTML = `<div class="avatar">O</div><div class="msg-body"><div class="msg-content"></div></div>`;
-        document.getElementById('messages-inner').appendChild(div);
-        renderMarkdown(div.querySelector('.msg-content'), m.content);
-      }
-      // 'system' and 'tool' messages are internal — not shown as chat bubbles
-    });
-    scrollToBottom();
-  } catch (e) {
-    document.getElementById('messages-inner').innerHTML =
-      '<div style="color:var(--text-dim); padding:16px; text-align:center;">Couldn\'t load this chat\'s history.</div>';
-  }
-}
-
-function newChat() {
-  if (busy) return;
-  threadId = null;
-  document.getElementById('messages-inner').innerHTML = '';
-  document.getElementById('messages').classList.remove('active');
-  document.getElementById('landing').style.display = 'flex';
-  document.getElementById('input-area').style.display = 'none';
-  removeAttachedDoc();
-  renderThreadList();
-  if (window.innerWidth <= 768) closeSidebar();
-}
-
-function toggleSidebar() {
-  const sidebar = document.getElementById('sidebar');
-  const overlay = document.getElementById('sidebar-overlay');
-  if (window.innerWidth <= 768) {
-    sidebar.classList.toggle('open');
-    overlay.classList.toggle('active');
-  } else {
-    // Desktop toggle with negative margin
-    if (sidebar.style.marginLeft === '-260px') {
-      sidebar.style.marginLeft = '0';
-    } else {
-      sidebar.style.marginLeft = '-260px';
     }
-  }
-}
 
-function closeSidebar() {
-  if (window.innerWidth <= 768) {
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sidebar-overlay').classList.remove('active');
-  }
-}
+    function updateInputModeForDoc() {
+      const hint = document.getElementById('input-hint');
+      if (!hint) return;
+      hint.textContent = attachedDoc
+        ? `"${attachedDoc.filename}" will be included with your next message.`
+        : 'The agent may create new agents or tools automatically to complete this goal.';
+    }
 
-function autoGrow(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-}
+    async function loadThreadsFromServer() {
+      try {
+        const res = await fetch(`${API_BASE}/threads`);
+        const data = await res.json();
+        threads = (data.threads || []).map(t => ({
+          id: t.thread_id,
+          title: t.title || '(untitled chat)',
+        }));
+        localStorage.setItem('threads', JSON.stringify(threads));
+      } catch (e) {
+        // backend unreachable — fall back to whatever was cached locally
+      }
+      renderThreadList();
+    }
 
-function handleKeydown(e, fromLanding) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendFrom(fromLanding);
-  }
-}
+    // Configure Marked to use Highlight.js
+    marked.setOptions({
+      breaks: true,
+      highlight: function (code, lang) {
+        const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+        return hljs.highlight(code, { language }).value;
+      }
+    });
 
-function showChatView() {
-  document.getElementById('landing').style.display = 'none';
-  document.getElementById('messages').classList.add('active');
-  document.getElementById('input-area').style.display = 'flex';
-  // Focus the input area
-  setTimeout(() => document.getElementById('goal-input').focus(), 100);
-}
+    function renderThreadList() {
+      const list = document.getElementById('thread-list');
+      list.innerHTML = '<div class="thread-section-label">Recents</div>';
+      if (!threads || threads.length === 0) {
+        list.innerHTML += '<div class="thread-item" style="color:var(--text-dim); pointer-events:none;">No recent chats</div>';
+        return;
+      }
 
-function scrollToBottom() {
-  const m = document.getElementById('messages');
-  m.scrollTop = m.scrollHeight;
-}
+      const visibleThreads = showAllThreads ? threads : threads.slice(0, 10);
+      visibleThreads.forEach(t => {
+        const el = document.createElement('div');
+        el.className = 'thread-item' + (t.id === threadId ? ' active' : '');
+        el.textContent = t.title;
+        el.onclick = () => switchThread(t.id);
+        list.appendChild(el);
+      });
 
-function addUserMessage(text, attachedFilename) {
-  const wrap = document.getElementById('messages-inner');
-  const div = document.createElement('div');
-  div.className = 'msg user';
-  const chip = attachedFilename
-    ? `<div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">📎 ${escapeHtml(attachedFilename)}</div>`
-    : '';
-  div.innerHTML = `<div class="msg-body">${chip}<div class="msg-content">${escapeHtml(text)}</div></div>`;
-  wrap.appendChild(div);
-  scrollToBottom();
-}
+      if (threads.length > 10) {
+        const btn = document.createElement('button');
+        btn.className = 'view-more-btn';
+        btn.textContent = showAllThreads ? 'Show less' : `View more (${threads.length - 10} more)`;
+        btn.onclick = () => {
+          showAllThreads = !showAllThreads;
+          renderThreadList();
+        };
+        list.appendChild(btn);
+      }
+    }
 
-function addAssistantMessage() {
-  const wrap = document.getElementById('messages-inner');
-  const div = document.createElement('div');
-  div.className = 'msg assistant';
-  div.innerHTML = `
+    async function switchThread(id) {
+      if (busy) return;
+      threadId = id;
+      document.getElementById('messages-inner').innerHTML = '';
+      showChatView();
+      renderThreadList();
+      loadWorkdirForThread(id);
+      if (window.innerWidth <= 768) closeSidebar();
+
+      try {
+        const res = await fetch(`${API_BASE}/thread/${encodeURIComponent(id)}/messages`);
+        const data = await res.json();
+        (data.messages || []).forEach(m => {
+          if (m.role === 'human') {
+            addUserMessage(m.content);
+          } else if (m.role === 'ai' && m.content && m.content.trim()) {
+            const div = document.createElement('div');
+            div.className = 'msg assistant';
+            div.innerHTML = `<div class="avatar">O</div><div class="msg-body"><div class="msg-content"></div></div>`;
+            document.getElementById('messages-inner').appendChild(div);
+            renderMarkdown(div.querySelector('.msg-content'), m.content);
+          }
+          // 'system' and 'tool' messages are internal — not shown as chat bubbles
+        });
+        scrollToBottom();
+      } catch (e) {
+        document.getElementById('messages-inner').innerHTML =
+          '<div style="color:var(--text-dim); padding:16px; text-align:center;">Couldn\'t load this chat\'s history.</div>';
+      }
+    }
+
+    function newChat() {
+      if (busy) return;
+      threadId = null;
+      document.getElementById('messages-inner').innerHTML = '';
+      document.getElementById('messages').classList.remove('active');
+      document.getElementById('landing').style.display = 'flex';
+      document.getElementById('input-area').style.display = 'none';
+      removeAttachedDoc();
+      activeWorkdir = null;
+      pendingWorkdir = null;
+      applyWorkdirChip(null);
+      renderThreadList();
+      if (window.innerWidth <= 768) closeSidebar();
+    }
+
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebar-overlay');
+      if (window.innerWidth <= 768) {
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('active');
+      } else {
+        // Desktop toggle with negative margin
+        if (sidebar.style.marginLeft === '-260px') {
+          sidebar.style.marginLeft = '0';
+        } else {
+          sidebar.style.marginLeft = '-260px';
+        }
+      }
+    }
+
+    function closeSidebar() {
+      if (window.innerWidth <= 768) {
+        document.getElementById('sidebar').classList.remove('open');
+        document.getElementById('sidebar-overlay').classList.remove('active');
+      }
+    }
+
+    function autoGrow(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    }
+
+    function handleKeydown(e, fromLanding) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendFrom(fromLanding);
+      }
+    }
+
+    function showChatView() {
+      document.getElementById('landing').style.display = 'none';
+      document.getElementById('messages').classList.add('active');
+      document.getElementById('input-area').style.display = 'flex';
+      // Focus the input area
+      setTimeout(() => document.getElementById('goal-input').focus(), 100);
+    }
+
+    function scrollToBottom() {
+      const m = document.getElementById('messages');
+      m.scrollTop = m.scrollHeight;
+    }
+
+    function addUserMessage(text, attachedFilename) {
+      const wrap = document.getElementById('messages-inner');
+      const div = document.createElement('div');
+      div.className = 'msg user';
+      const chip = attachedFilename
+        ? `<div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">📎 ${escapeHtml(attachedFilename)}</div>`
+        : '';
+      div.innerHTML = `<div class="msg-body">${chip}<div class="msg-content">${escapeHtml(text)}</div></div>`;
+      wrap.appendChild(div);
+      scrollToBottom();
+    }
+
+    function addAssistantMessage() {
+      const wrap = document.getElementById('messages-inner');
+      const div = document.createElement('div');
+      div.className = 'msg assistant';
+      div.innerHTML = `
     <div class="avatar">O</div>
     <div class="msg-body">
       <div class="steps-block" style="display:none;">
@@ -623,134 +1566,148 @@ function addAssistantMessage() {
       </div>
       <div class="msg-content"><div class="typing-dots"><span></span><span></span><span></span></div></div>
     </div>`;
-  wrap.appendChild(div);
-  scrollToBottom();
-  return div;
-}
-
-function escapeHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
-
-function renderMarkdown(el, text) {
-  const dirty = marked.parse(text || '');
-  el.innerHTML = DOMPurify.sanitize(dirty);
-}
-
-function sendFrom(fromLanding) {
-  const inputEl = document.getElementById(fromLanding ? 'goal-input-landing' : 'goal-input');
-  const text = inputEl.value.trim();
-  if (!text || busy) return;
-  inputEl.value = '';
-  autoGrow(inputEl);
-
-  if (fromLanding) showChatView();
-  addUserMessage(text, attachedDoc ? attachedDoc.filename : null);
-
-  const docId = attachedDoc ? attachedDoc.doc_id : null;
-  removeAttachedDoc(); // one-shot attach: content is folded into this message, then cleared
-  runGoal(text, docId);
-}
-
-function runGoal(goal, docId) {
-  busy = true;
-  const sendBtn = document.getElementById('send-btn');
-  if (sendBtn) sendBtn.disabled = true;
-
-  const msgDiv = addAssistantMessage();
-  const stepsBlock = msgDiv.querySelector('.steps-block');
-  const stepsBody = msgDiv.querySelector('.steps-body');
-  const stepsSummary = msgDiv.querySelector('.steps-summary');
-  const contentEl = msgDiv.querySelector('.msg-content');
-
-  let url = `${API_BASE}/chat/stream?goal=${encodeURIComponent(goal)}`;
-  if (threadId) url += `&thread_id=${encodeURIComponent(threadId)}`;
-  if (docId) url += `&doc_id=${encodeURIComponent(docId)}`;
-
-  const es = new EventSource(url);
-
-  es.addEventListener('thread', (e) => {
-    const data = JSON.parse(e.data);
-    threadId = data.thread_id;
-    const titleText = goal.slice(0, 40);
-    const existingIndex = threads.findIndex(t => t.id === threadId);
-    if (existingIndex !== -1) {
-      const [item] = threads.splice(existingIndex, 1);
-      item.title = titleText;
-      threads.unshift(item);
-    } else {
-      threads.unshift({ id: threadId, title: titleText });
+      wrap.appendChild(div);
+      scrollToBottom();
+      return div;
     }
-    localStorage.setItem('threads', JSON.stringify(threads));
-    renderThreadList();
-  });
 
-  es.addEventListener('plan', (e) => {
-    const plan = JSON.parse(e.data).task_plan || [];
-    stepsBlock.style.display = 'block';
-    stepsSummary.textContent = `Plan — ${plan.length} task${plan.length === 1 ? '' : 's'}`;
-    stepsBody.innerHTML = plan.map(t =>
-      `<div class="step-row"><span class="step-role">${escapeHtml(t.agent_role)}</span><span>${escapeHtml(t.description)}</span></div>`
-    ).join('');
-    scrollToBottom();
-  });
-
-  es.addEventListener('status', (e) => {
-    const msg = JSON.parse(e.data).message;
-    const row = document.createElement('div');
-    row.className = 'step-status';
-    row.textContent = msg;
-    stepsBody.appendChild(row);
-    scrollToBottom();
-  });
-
-  es.addEventListener('evaluation', (e) => {
-    const v = JSON.parse(e.data);
-    const row = document.createElement('div');
-    row.className = 'step-status ' + (v.status === 'RETRY' ? 'retry' : 'pass');
-    row.textContent = v.status === 'RETRY'
-      ? `Retry requested — ${v.reason || ''}`
-      : `Task evaluated — ${v.reason || 'looks good'}`;
-    stepsBody.appendChild(row);
-    scrollToBottom();
-  });
-
-  es.addEventListener('final_answer', (e) => {
-    const answer = JSON.parse(e.data).answer;
-    renderMarkdown(contentEl, answer);
-    scrollToBottom();
-  });
-
-  es.addEventListener('error', (e) => {
-    const msg = JSON.parse(e.data).message || 'Something went wrong.';
-    contentEl.innerHTML = `<span style="color:var(--accent);">${escapeHtml(msg)}</span>`;
-    scrollToBottom();
-  });
-
-  es.addEventListener('done', () => {
-    es.close();
-    busy = false;
-    if (sendBtn) sendBtn.disabled = false;
-    // if no final answer arrived, but we are done and still show typing dots
-    if (contentEl.querySelector('.typing-dots')) {
-      contentEl.innerHTML = '<em>Task completed.</em>';
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
     }
-  });
 
-  es.onerror = () => {
-    es.close();
-    busy = false;
-    if (sendBtn) sendBtn.disabled = false;
-    if (!contentEl.textContent.trim() || contentEl.querySelector('.typing-dots')) {
-      contentEl.innerHTML = '<span style="color:var(--accent);">Connection lost before a final answer arrived.</span>';
+    function renderMarkdown(el, text) {
+      const dirty = marked.parse(text || '');
+      el.innerHTML = DOMPurify.sanitize(dirty);
     }
-  };
-}
 
-loadThreadsFromServer();
-</script>
+    function sendFrom(fromLanding) {
+      const inputEl = document.getElementById(fromLanding ? 'goal-input-landing' : 'goal-input');
+      const text = inputEl.value.trim();
+      if (!text || busy) return;
+      inputEl.value = '';
+      autoGrow(inputEl);
+
+      if (fromLanding) showChatView();
+      addUserMessage(text, attachedDoc ? attachedDoc.filename : null);
+
+      const docId = attachedDoc ? attachedDoc.doc_id : null;
+      removeAttachedDoc(); // one-shot attach: content is folded into this message, then cleared
+      runGoal(text, docId);
+    }
+
+    function runGoal(goal, docId) {
+      busy = true;
+      const sendBtn = document.getElementById('send-btn');
+      if (sendBtn) sendBtn.disabled = true;
+
+      const msgDiv = addAssistantMessage();
+      const stepsBlock = msgDiv.querySelector('.steps-block');
+      const stepsBody = msgDiv.querySelector('.steps-body');
+      const stepsSummary = msgDiv.querySelector('.steps-summary');
+      const contentEl = msgDiv.querySelector('.msg-content');
+
+      let url = `${API_BASE}/chat/stream?goal=${encodeURIComponent(goal)}`;
+      if (threadId) url += `&thread_id=${encodeURIComponent(threadId)}`;
+      if (docId) url += `&doc_id=${encodeURIComponent(docId)}`;
+      // A folder picked before this thread existed (pendingWorkdir) rides
+      // along with the very first message so the server can apply it to
+      // the thread_id it assigns, in the same request -- see run()'s
+      // workdir param in dynamic_langgraph_backend.py.
+      const workdirForThisSend = threadId ? activeWorkdir : pendingWorkdir;
+      if (workdirForThisSend) url += `&workdir=${encodeURIComponent(workdirForThisSend)}`;
+
+      const es = new EventSource(url);
+
+      es.addEventListener('thread', (e) => {
+        const data = JSON.parse(e.data);
+        threadId = data.thread_id;
+        if (workdirForThisSend) {
+          activeWorkdir = workdirForThisSend;
+          pendingWorkdir = null;
+          workdirsByThread[threadId] = activeWorkdir;
+          localStorage.setItem('workdirsByThread', JSON.stringify(workdirsByThread));
+          applyWorkdirChip(activeWorkdir);
+        }
+        const titleText = goal.slice(0, 40);
+        const existingIndex = threads.findIndex(t => t.id === threadId);
+        if (existingIndex !== -1) {
+          const [item] = threads.splice(existingIndex, 1);
+          item.title = titleText;
+          threads.unshift(item);
+        } else {
+          threads.unshift({ id: threadId, title: titleText });
+        }
+        localStorage.setItem('threads', JSON.stringify(threads));
+        renderThreadList();
+      });
+
+      es.addEventListener('plan', (e) => {
+        const plan = JSON.parse(e.data).task_plan || [];
+        stepsBlock.style.display = 'block';
+        stepsSummary.textContent = `Plan — ${plan.length} task${plan.length === 1 ? '' : 's'}`;
+        stepsBody.innerHTML = plan.map(t =>
+          `<div class="step-row"><span class="step-role">${escapeHtml(t.agent_role)}</span><span>${escapeHtml(t.description)}</span></div>`
+        ).join('');
+        scrollToBottom();
+      });
+
+      es.addEventListener('status', (e) => {
+        const msg = JSON.parse(e.data).message;
+        const row = document.createElement('div');
+        row.className = 'step-status';
+        row.textContent = msg;
+        stepsBody.appendChild(row);
+        scrollToBottom();
+      });
+
+      es.addEventListener('evaluation', (e) => {
+        const v = JSON.parse(e.data);
+        const row = document.createElement('div');
+        row.className = 'step-status ' + (v.status === 'RETRY' ? 'retry' : 'pass');
+        row.textContent = v.status === 'RETRY'
+          ? `Retry requested — ${v.reason || ''}`
+          : `Task evaluated — ${v.reason || 'looks good'}`;
+        stepsBody.appendChild(row);
+        scrollToBottom();
+      });
+
+      es.addEventListener('final_answer', (e) => {
+        const answer = JSON.parse(e.data).answer;
+        renderMarkdown(contentEl, answer);
+        scrollToBottom();
+      });
+
+      es.addEventListener('error', (e) => {
+        const msg = JSON.parse(e.data).message || 'Something went wrong.';
+        contentEl.innerHTML = `<span style="color:var(--accent);">${escapeHtml(msg)}</span>`;
+        scrollToBottom();
+      });
+
+      es.addEventListener('done', () => {
+        es.close();
+        busy = false;
+        if (sendBtn) sendBtn.disabled = false;
+        // if no final answer arrived, but we are done and still show typing dots
+        if (contentEl.querySelector('.typing-dots')) {
+          contentEl.innerHTML = '<em>Task completed.</em>';
+        }
+      });
+
+      es.onerror = () => {
+        es.close();
+        busy = false;
+        if (sendBtn) sendBtn.disabled = false;
+        if (!contentEl.textContent.trim() || contentEl.querySelector('.typing-dots')) {
+          contentEl.innerHTML = '<span style="color:var(--accent);">Connection lost before a final answer arrived.</span>';
+        }
+      };
+    }
+
+    loadThreadsFromServer();
+  </script>
 
 </body>
+
 </html>

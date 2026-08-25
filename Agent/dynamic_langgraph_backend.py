@@ -118,18 +118,44 @@ llm = ChatOpenAI(
 
 # ---------- agent workdir & path confinement ----------
 # Everything the agent's read_file/write_file/list_directory/create_artifact
-# tools touch lives under AGENT_WORKDIR. This is a *separate* tree from the
+# tools touch lives under a "workdir". This is a *separate* tree from the
 # app's own storage (DB/, tool_envs/, tools/, logs/), so a careless or
 # adversarial write from agent (or LLM-generated tool) code can't reach the
 # checkpoint db, sandbox venvs, or persisted tool source.
-AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", os.path.join(os.getcwd(), "agent_workspace"))).resolve()
-AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
+#
+# DEFAULT_AGENT_WORKDIR is the fallback used when a thread hasn't picked a
+# folder of its own. Cowork-style "select a working directory" support lets
+# each thread point its tools at a *different* folder on disk instead --
+# see DynamicAgentManager.set_working_directory() below. The active workdir
+# for whichever thread is currently running is tracked in `_workdir_ctx`
+# (same contextvar pattern as `_token_usage_ctx`), so every tool call made
+# during that run resolves paths against the right folder without needing
+# the thread_id threaded through every function signature.
+DEFAULT_AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", os.path.join(os.getcwd(), "agent_workspace"))).resolve()
+DEFAULT_AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
 
-ARTIFACTS_DIR = AGENT_WORKDIR / ".artifacts"
-ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+_workdir_ctx: contextvars.ContextVar[Path | None] = contextvars.ContextVar("workdir_ctx", default=None)
 
-# Internal app directories the agent must never read/write/list, even if
-# AGENT_WORKDIR is ever misconfigured to overlap the project root. Resolved
+
+def current_workdir() -> Path:
+    """The workdir tools should confine themselves to for the run currently
+    in progress: the thread's selected cowork folder if one is set, else
+    DEFAULT_AGENT_WORKDIR."""
+    return _workdir_ctx.get() or DEFAULT_AGENT_WORKDIR
+
+
+def current_artifacts_dir() -> Path:
+    """Artifacts live inside a `.artifacts` folder of whichever workdir is
+    active, so a report the agent creates while cowork'd into a user's
+    folder actually shows up there, rather than always landing in the
+    default workspace."""
+    d = current_workdir() / ".artifacts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Internal app directories the agent must never read/write/list, even if a
+# workdir is ever misconfigured to overlap the project root. Resolved
 # lazily (not at import time) so they reflect wherever the process actually
 # ends up creating them (relative to cwd, same as the DB/tool_envs/logs
 # creation calls elsewhere in this file).
@@ -141,13 +167,17 @@ def _agent_data_roots() -> list[Path]:
 
 
 class PathConfinementError(Exception):
-    """Raised when a tool-requested path would escape AGENT_WORKDIR."""
+    """Raised when a tool-requested path would escape the active workdir."""
+
+
+class WorkdirSelectionError(Exception):
+    """Raised when a user-requested working directory is invalid or refused."""
 
 
 def resolve_and_confine(path_str: str | None, base: Path = None) -> Path:
-    """Canonicalize a path relative to `base` (default AGENT_WORKDIR) and
-    reject any escape (via '..' or a symlink) outside it."""
-    base = (base or AGENT_WORKDIR).resolve()
+    """Canonicalize a path relative to `base` (default: the active workdir)
+    and reject any escape (via '..' or a symlink) outside it."""
+    base = (base or current_workdir()).resolve()
     candidate = (base / path_str) if path_str else base
     resolved = candidate.resolve()
     if not (resolved == base or resolved.is_relative_to(base)):
@@ -163,6 +193,29 @@ _APP_DATA_ERROR = (
     "Refused: this path is inside the application's internal data directory "
     "(DB, tool_envs, tools, logs) -- never a target for agent file operations."
 )
+
+def _as_text(content) -> str:
+    """Extract plain text from a BaseMessage.content, which is normally a
+    str but becomes a list of content blocks (text + image_url) once
+    multimodal attachments are involved -- every place that treats
+    message content as a plain string (planner goal, evaluator output,
+    conversation history) needs this instead of assuming str."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        return "\n".join(p for p in parts if p)
+    return str(content) if content else ""
+
+
+def _extract_image_blocks(content) -> list[dict]:
+    """Pull the image_url content blocks (if any) out of a message's
+    content, so they can be re-attached to whichever task actually needs
+    to see them, instead of being lost once the goal is reduced to text."""
+    if isinstance(content, list):
+        return [b for b in content if isinstance(b, dict) and b.get("type") == "image_url"]
+    return []
+
 
 def parse_json_safely(text: str, default=None):
     """Extract and parse JSON from an LLM response, tolerating markdown fences."""
@@ -220,6 +273,11 @@ class OrchestratorState(TypedDict):
     retry_count: int
     last_verdict: dict
     conversation_history: Annotated[list[dict], operator.add]
+    attachments: list[dict]
+    """image_url content blocks carried over from the triggering user
+    message (see _extract_image_blocks) so any task in the plan can see
+    an attached image, not just whichever task happens to read
+    state["messages"] directly."""
 
 
 MAX_HISTORY_TURNS_IN_PROMPT = 12  # cap how many past turns we inject into prompts
@@ -499,6 +557,7 @@ class DynamicToolRegistry:
         self.register_tool("read_file", self._read_file_tool())
         self.register_tool("write_file", self._write_file_tool())
         self.register_tool("list_directory", self._list_directory_tool())
+        self.register_tool("view_image", self._view_image_tool())
         self.register_tool("create_artifact", self._create_artifact_tool())
 
     def list_artifacts(self) -> list[dict]:
@@ -534,7 +593,7 @@ class DynamicToolRegistry:
     _DEFAULT_TOOL_NAMES = (
         "search", "calculator", "stock_price",
         "read_document", "list_documents", "generate_document",
-        "read_file", "write_file", "list_directory", "create_artifact",
+        "read_file", "write_file", "list_directory", "view_image", "create_artifact",
     )
 
     def remove_tool(self, name: str, delete_generated_code: bool = True) -> bool:
@@ -695,17 +754,28 @@ class DynamicToolRegistry:
     def _read_file_tool() -> BaseTool:
         @tool
         def read_file(path: str, start_line: int = 0, end_line: int = 0) -> dict:
-            """Read a text file from the agent workspace, optionally by line range.
+            """Read a file from the current agent workspace, optionally by line
+            range. Handles any file type the workspace might contain:
+
+            - Plain text / code files: read directly, optionally sliced by
+              start_line/end_line.
+            - .pdf / .docx / .csv / .xlsx: extracted to plain text
+              automatically (same extractor the upload pipeline uses).
+            - Images (.png/.jpg/.jpeg/.gif/.webp): NOT handled here -- use
+              the `view_image` tool instead, which attaches the image
+              itself for you to see rather than returning text.
 
             Parameters
             ----------
             path : str
-                Path relative to the agent workspace. Must not be absolute
-                or contain '..' -- both are rejected.
+                Path relative to the current working directory. Must not be
+                absolute or contain '..' -- both are rejected.
             start_line : int
-                1-indexed first line to include. 0 (default) means "from the start".
+                1-indexed first line to include (plain-text files only). 0
+                (default) means "from the start".
             end_line : int
-                1-indexed last line to include. 0 (default) means "to the end".
+                1-indexed last line to include (plain-text files only). 0
+                (default) means "to the end".
             """
             try:
                 resolved = resolve_and_confine(path)
@@ -715,6 +785,27 @@ class DynamicToolRegistry:
                 return {"error": _APP_DATA_ERROR}
             if not resolved.is_file():
                 return {"error": f"Not a file: {path}"}
+
+            ext = resolved.suffix.lower()
+            if docpipe.is_image_extension(ext):
+                return {
+                    "error": (
+                        f"'{path}' is an image file. Use the `view_image` tool to "
+                        "look at it instead of read_file."
+                    )
+                }
+
+            if ext in docpipe.TEXT_EXTENSIONS - {".txt"}:
+                # pdf / docx / csv / xlsx -- extract to text via the same
+                # pipeline uploads go through, instead of dumping raw bytes.
+                try:
+                    content = docpipe.extract_text(resolved.name, resolved.read_bytes())
+                except Exception as e:
+                    return {"error": f"Could not extract text from '{path}': {type(e).__name__}: {e}"}
+                truncated = len(content) > MAX_READ_CHARS
+                if truncated:
+                    content = content[:MAX_READ_CHARS]
+                return {"path": path, "content": content, "truncated": truncated, "extracted_from": ext}
 
             lines = resolved.read_text(errors="replace").splitlines(keepends=True)
             if start_line or end_line:
@@ -727,6 +818,55 @@ class DynamicToolRegistry:
                 content = content[:MAX_READ_CHARS]
             return {"path": path, "content": content, "truncated": truncated}
         return read_file
+
+    @staticmethod
+    def _view_image_tool() -> BaseTool:
+        @tool
+        def view_image(path: str) -> dict:
+            """Load an image file from the current agent workspace so you can
+            actually see it. Use this for .png/.jpg/.jpeg/.gif/.webp files
+            instead of read_file -- read_file only handles text-representable
+            content and will refuse image paths.
+
+            After this tool runs, the image is attached to the conversation
+            for you to look at directly on your next turn.
+
+            Parameters
+            ----------
+            path : str
+                Path relative to the current working directory. Must not be
+                absolute or contain '..' -- both are rejected.
+            """
+            try:
+                resolved = resolve_and_confine(path)
+            except PathConfinementError as e:
+                return {"error": str(e)}
+            if _path_touches_agent_data(resolved):
+                return {"error": _APP_DATA_ERROR}
+            if not resolved.is_file():
+                return {"error": f"Not a file: {path}"}
+
+            ext = resolved.suffix.lower()
+            if not docpipe.is_image_extension(ext):
+                return {"error": f"'{path}' is not a supported image type ({sorted(docpipe.IMAGE_EXTENSIONS)})."}
+
+            data = resolved.read_bytes()
+            if len(data) > docpipe.MAX_IMAGE_BYTES:
+                return {
+                    "error": (
+                        f"Image is {len(data)} bytes, over the {docpipe.MAX_IMAGE_BYTES}-byte limit "
+                        "for viewing."
+                    )
+                }
+
+            import base64
+            return {
+                "is_image": True,
+                "path": path,
+                "mime_type": docpipe.image_mime_type(ext),
+                "data_b64": base64.b64encode(data).decode("ascii"),
+            }
+        return view_image
 
     @staticmethod
     def _write_file_tool() -> BaseTool:
@@ -819,8 +959,7 @@ class DynamicToolRegistry:
 
             artifact_id = uuid.uuid4().hex
             stem = f"{artifact_id}__{filename}"
-            out_dir = ARTIFACTS_DIR
-            out_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = current_artifacts_dir()
 
             try:
                 if kind == "doc":
@@ -1291,6 +1430,41 @@ class DynamicAgentManager:
         self.extra_instruction = ""
         self.temperature = 0.0
         self.chatbot = self._build_graph()
+        self._thread_workdirs: dict[str, Path] = {}
+        """Cowork-style per-thread working directory selection: each
+        thread_id can point its file tools (read_file/write_file/
+        list_directory/view_image/create_artifact) at a different folder
+        on disk. Threads that never call set_working_directory keep using
+        DEFAULT_AGENT_WORKDIR."""
+
+    # ---------- working directory (cowork) ----------
+    def set_working_directory(self, thread_id: str, path: str) -> dict:
+        """Point a thread's file tools at an existing folder on disk.
+
+        Refuses paths that don't exist, aren't directories, or land inside
+        the application's own internal data directories (DB, tool_envs,
+        tools, logs) -- same protection resolve_and_confine gives ordinary
+        tool calls, applied up front so a bad selection fails clearly
+        instead of surfacing as confusing tool errors later.
+        """
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.exists():
+            raise WorkdirSelectionError(f"No such directory: {path}")
+        if not resolved.is_dir():
+            raise WorkdirSelectionError(f"Not a directory: {path}")
+        if _path_touches_agent_data(resolved):
+            raise WorkdirSelectionError(
+                f"Refused: '{path}' is inside the application's internal data directory."
+            )
+        self._thread_workdirs[thread_id] = resolved
+        print(f"📂 Thread {thread_id} working directory set to: {resolved}")
+        return {"status": "ok", "thread_id": thread_id, "workdir": str(resolved)}
+
+    def get_working_directory(self, thread_id: str) -> str:
+        return str(self._thread_workdirs.get(thread_id, DEFAULT_AGENT_WORKDIR))
+
+    def clear_working_directory(self, thread_id: str) -> None:
+        self._thread_workdirs.pop(thread_id, None)
 
     # ---------- dynamic configuration ----------
     def set_behavior_style(self, style: str):
@@ -1308,8 +1482,10 @@ class DynamicAgentManager:
 
     # ---------- graph nodes ----------
     def _planner_node(self, state: OrchestratorState):
-        goal = state["messages"][-1].content
-        print(f"🧭 Planning for goal: {goal}")
+        triggering_content = state["messages"][-1].content
+        goal = _as_text(triggering_content)
+        attachments = _extract_image_blocks(triggering_content)
+        print(f"🧭 Planning for goal: {goal}" + (f" (+{len(attachments)} image attachment(s))" if attachments else ""))
 
         prior_history = state.get("conversation_history", []) or []
         history_text = _format_conversation_history(prior_history)
@@ -1369,6 +1545,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             "retry_count": 0,
             "last_verdict": {},
             "conversation_history": [{"role": "user", "content": goal}],
+            "attachments": attachments,
         }
 
     def _agent_executor_node(self, state: OrchestratorState):
@@ -1390,9 +1567,17 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 
             # Regenerate the tool directive fresh so it reflects the agent's current tools
             full_system_prompt = agent["system_prompt"] + self.agent_factory.tool_directive(agent["tool_names"])
+            attachments = state.get("attachments") or []
+            if attachments:
+                # Multimodal content: text block plus whatever images came in
+                # with the triggering user message, so this task's agent can
+                # actually see them, not just read a text description.
+                init_content = [{"type": "text", "text": init_prompt}, *attachments]
+            else:
+                init_content = init_prompt
             task_messages = [
                 SystemMessage(content=full_system_prompt),
-                HumanMessage(content=init_prompt),
+                HumanMessage(content=init_content),
             ]
 
         # Check if max tool calls limit is reached for this task
@@ -1424,6 +1609,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         last = state["task_messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
         tool_messages = []
+        pending_images: list[dict] = []
         for call in tool_calls:
             tool_name = call["name"]
             tool_args = call.get("args", {})
@@ -1442,19 +1628,42 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                     )
             except Exception as e:
                 result = f"Error executing tool '{tool_name}': {e}"
-            tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+
+            if isinstance(result, dict) and result.get("is_image"):
+                # ToolMessage content must stay a plain string (OpenAI's API
+                # doesn't accept image content there) -- so the ToolMessage
+                # itself just confirms the load, and the actual image_url
+                # block is queued to arrive as a follow-up HumanMessage the
+                # agent sees on its very next turn.
+                pending_images.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{result['mime_type']};base64,{result['data_b64']}"}}
+                )
+                summary = f"Loaded image '{result.get('path')}' ({result['mime_type']}); it is now attached for you to view."
+                tool_messages.append(ToolMessage(content=summary, tool_call_id=call["id"]))
+            else:
+                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+
+        updated_task_messages = state["task_messages"] + tool_messages
+        extra_messages = list(tool_messages)
+        if pending_images:
+            image_message = HumanMessage(
+                content=[{"type": "text", "text": "Here is the image you just loaded:"}, *pending_images]
+            )
+            updated_task_messages = updated_task_messages + [image_message]
+            extra_messages = extra_messages + [image_message]
+
         # Mirror into `messages` too, same reason as agent_executor_node above
-        return {"task_messages": state["task_messages"] + tool_messages, "messages": tool_messages}
+        return {"task_messages": updated_task_messages, "messages": extra_messages}
 
     def _evaluator_node(self, state: OrchestratorState):
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         task_messages = state["task_messages"]
-        final_content = (task_messages[-1].content if task_messages else "") or ""
+        final_content = _as_text(task_messages[-1].content) if task_messages else ""
         if not final_content and task_messages:
             for m in reversed(task_messages):
                 if getattr(m, "content", None):
-                    final_content = str(m.content)
+                    final_content = _as_text(m.content)
                     break
 
         eval_prompt = f"""
@@ -1662,7 +1871,8 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         messages = state.values.get("messages", []) if state and state.values else []
         return [{"role": getattr(m, "type", "unknown"), "content": getattr(m, "content", "")} for m in messages]
 
-    def run(self, user_input: str, thread_id: str, requirements: dict = None):
+    def run(self, user_input: str, thread_id: str, requirements: dict = None, doc_ids: list[str] = None,
+            workdir: str = None):
         """
         requirements: {
             "new_tools": [{"name": "...", "prompt": "..."}],
@@ -1670,7 +1880,23 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             "preprocessing": "extra instruction text",
             "temperature": 0.0-1.0,
         }
+        doc_ids: doc_ids returned by document_pipeline.process_upload() for
+            any files (documents or images) the user attached to this
+            message. Text-extractable docs are folded into the prompt;
+            images are attached as real vision content -- see
+            document_pipeline.build_multimodal_message.
+        workdir: an on-disk folder to point this thread's local file tools
+            (read_file/write_file/list_directory/view_image/create_artifact)
+            at, same as select_working_directory(). Accepted here too so a
+            caller can select a local working directory in the SAME request
+            that starts a brand-new thread, instead of needing an already-
+            known thread_id to call select_working_directory() with first.
+            Raises WorkdirSelectionError if the path doesn't exist, isn't a
+            directory, or is refused (see set_working_directory).
         """
+        if workdir:
+            self.set_working_directory(thread_id, workdir)
+
         if requirements:
             if requirements.get("new_tools"):
                 for tool_spec in requirements["new_tools"]:
@@ -1689,15 +1915,19 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             "metadata": {"goal": user_input, "thread_id": thread_id},
         }
 
+        message_content = docpipe.build_multimodal_message(user_input, doc_ids)
+
         usage_records: list = []
         ctx_token = _token_usage_ctx.set(usage_records)
+        workdir_token = _workdir_ctx.set(self._thread_workdirs.get(thread_id))
         try:
             response = self.chatbot.invoke(
-                {"messages": [HumanMessage(content=user_input)]},
+                {"messages": [HumanMessage(content=message_content)]},
                 config=config,
             )
         finally:
             _token_usage_ctx.reset(ctx_token)
+            _workdir_ctx.reset(workdir_token)
 
         token_usage = self._summarize_token_usage(usage_records)
         self._print_token_usage(user_input, token_usage)
@@ -1774,5 +2004,28 @@ def remove_tool_dynamically(tool_name: str) -> bool:
     return agent_manager.remove_tool(tool_name)
 
 
-def run_agent_with_requirements(user_input: str, thread_id: str, requirements: dict = None):
-    return agent_manager.run(user_input, thread_id, requirements)
+def run_agent_with_requirements(user_input: str, thread_id: str, requirements: dict = None, doc_ids: list[str] = None,
+                                 workdir: str = None):
+    return agent_manager.run(user_input, thread_id, requirements, doc_ids, workdir)
+
+
+def select_working_directory(thread_id: str, path: str) -> dict:
+    """Cowork-style folder picker: point a thread's file tools at an
+    existing directory on disk. Raises WorkdirSelectionError on an
+    invalid or refused path."""
+    return agent_manager.set_working_directory(thread_id, path)
+
+
+def get_working_directory(thread_id: str) -> str:
+    return agent_manager.get_working_directory(thread_id)
+
+
+def clear_working_directory(thread_id: str) -> None:
+    """Reset a thread's file tools back to DEFAULT_AGENT_WORKDIR."""
+    agent_manager.clear_working_directory(thread_id)
+
+
+def upload_file(filename: str, data: bytes) -> str:
+    """Process an uploaded file (document or image) and return its doc_id,
+    ready to pass into run_agent_with_requirements(..., doc_ids=[...])."""
+    return docpipe.process_upload(filename, data)
