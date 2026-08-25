@@ -264,7 +264,7 @@ def _extract_usage(response) -> dict:
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
-        return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "found": True}
 
     # Fallback: raw OpenAI-style token_usage dict inside response_metadata
     meta = getattr(response, "response_metadata", {}) or {}
@@ -272,15 +272,29 @@ def _extract_usage(response) -> dict:
     input_tokens = token_usage.get("prompt_tokens", 0)
     output_tokens = token_usage.get("completion_tokens", 0)
     total_tokens = token_usage.get("total_tokens", input_tokens + output_tokens)
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "found": bool(token_usage),
+    }
 
 
 def _record_token_usage(node: str, response, tags: list[str] | None = None):
-    """Record one LLM call's token usage against the currently-running `run()` call, if tracking is active."""
+    """Record one LLM call's token usage against the currently-running `run()` call (if tracking is
+    active) and log it immediately, so token counts are visible call-by-call rather than only in the
+    end-of-run summary."""
+    usage = _extract_usage(response)
+    found = usage.pop("found")
+    if found:
+        _log("TOKEN-USAGE", f"[{node}] input={usage['input_tokens']} output={usage['output_tokens']} total={usage['total_tokens']}")
+    else:
+        _log("TOKEN-USAGE", f"[{node}] ⚠️ no usage metadata on response (provider didn't return token counts) — recording as 0")
+
     bucket = _token_usage_ctx.get()
     if bucket is None:
-        return  # no active run() context (e.g. called outside DynamicAgentManager.run)
-    usage = _extract_usage(response)
+        _log("TOKEN-USAGE", f"[{node}] not recorded in run summary (called outside an active run() context)")
+        return
     bucket.append({"node": node, "tags": tags or [], **usage})
 
 
@@ -1960,26 +1974,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         if workdir:
             self.set_working_directory(thread_id, workdir)
 
-        if requirements:
-            if requirements.get("new_tools"):
-                for tool_spec in requirements["new_tools"]:
-                    self.add_tool_from_prompt(tool_spec["prompt"], tool_spec["name"])
-            if "dynamic_behavior" in requirements:
-                self.set_behavior_style(requirements["dynamic_behavior"])
-            if "preprocessing" in requirements:
-                self.set_extra_instruction(requirements["preprocessing"])
-            if "temperature" in requirements:
-                self.set_temperature(requirements["temperature"])
-
-        config = {
-            "configurable": {"thread_id": thread_id},
-            "run_name": "orchestrator_run",
-            "tags": ["orchestrator_run"],
-            "metadata": {"goal": user_input, "thread_id": thread_id},
-        }
-
-        message_content = docpipe.build_multimodal_message(user_input, doc_ids)
-
         _log("WORKFLOW", f"########## RUN START (thread={thread_id}) ##########")
         _log("WORKFLOW", f"User input: {user_input!r}")
 
@@ -1987,6 +1981,26 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         ctx_token = _token_usage_ctx.set(usage_records)
         workdir_token = _workdir_ctx.set(self._thread_workdirs.get(thread_id))
         try:
+            if requirements:
+                if requirements.get("new_tools"):
+                    for tool_spec in requirements["new_tools"]:
+                        self.add_tool_from_prompt(tool_spec["prompt"], tool_spec["name"])
+                if "dynamic_behavior" in requirements:
+                    self.set_behavior_style(requirements["dynamic_behavior"])
+                if "preprocessing" in requirements:
+                    self.set_extra_instruction(requirements["preprocessing"])
+                if "temperature" in requirements:
+                    self.set_temperature(requirements["temperature"])
+
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "run_name": "orchestrator_run",
+                "tags": ["orchestrator_run"],
+                "metadata": {"goal": user_input, "thread_id": thread_id},
+            }
+
+            message_content = docpipe.build_multimodal_message(user_input, doc_ids)
+
             response = self.chatbot.invoke(
                 {"messages": [HumanMessage(content=message_content)]},
                 config=config,
@@ -2040,7 +2054,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     @staticmethod
     def _print_token_usage(user_input: str, token_usage: dict):
         totals = token_usage["totals"]
-        print(f"\n🔢 Token usage for prompt: {user_input[:80]!r}")
+        _log("TOKEN-USAGE", f"===== Token usage summary for prompt: {user_input[:80]!r} =====")
         for c in token_usage["calls"]:
             print(
                 f"   [{c['step']}] {c['node']:<32} "
