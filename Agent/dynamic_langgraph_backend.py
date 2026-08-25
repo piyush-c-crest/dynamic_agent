@@ -1977,7 +1977,7 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         """Pass only prior task results into a new task's prompt, keeping context small."""
         if not task_results:
             return ""
-        lines = [f"- {tid}: {str(res)[:300]}" for tid, res in task_results.items()]
+        lines = [f"- {tid}: {str(res)}" for tid, res in task_results.items()]
         return "\n".join(lines)
 
     # ---------- public API ----------
