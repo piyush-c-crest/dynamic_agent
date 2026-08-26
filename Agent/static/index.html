@@ -787,6 +787,202 @@
       overflow: hidden;
     }
 
+    /* File-manager-style folder picker (wider than a plain modal) */
+    .modal.filepicker {
+      max-width: 720px;
+      height: 560px;
+      max-height: 84vh;
+    }
+
+    .fp-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .fp-nav-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .fp-nav-btn:hover:not(:disabled) {
+      background: var(--border);
+    }
+
+    .fp-nav-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+
+    .fp-nav-btn svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .fp-addr {
+      flex: 1;
+      padding: 7px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text);
+      font-size: 13px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      outline: none;
+      min-width: 0;
+    }
+
+    .fp-addr:focus {
+      border-color: var(--accent);
+    }
+
+    .fp-body {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .fp-sidebar {
+      width: 160px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      padding: 10px 8px;
+      overflow-y: auto;
+    }
+
+    .fp-sidebar-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--text-dim);
+      padding: 4px 8px 6px;
+    }
+
+    .fp-sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 7px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .fp-sidebar-item:hover {
+      background: var(--sidebar-bg);
+    }
+
+    .fp-sidebar-item.active {
+      background: var(--sidebar-bg);
+      color: var(--accent);
+    }
+
+    .fp-sidebar-item svg {
+      width: 15px;
+      height: 15px;
+      flex-shrink: 0;
+      opacity: 0.85;
+    }
+
+    .fp-main {
+      flex: 1;
+      min-width: 0;
+      overflow-y: auto;
+      padding: 6px;
+    }
+
+    .fp-entry {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13.5px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .fp-entry:hover {
+      background: var(--sidebar-bg);
+    }
+
+    .fp-entry.selected {
+      background: var(--accent);
+      color: white;
+    }
+
+    .fp-entry.is-file {
+      cursor: default;
+      color: var(--text-dim);
+    }
+
+    .fp-entry.is-file:hover {
+      background: none;
+    }
+
+    .fp-entry-icon {
+      flex-shrink: 0;
+      display: flex;
+    }
+
+    .fp-entry-icon svg {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .fp-entry-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .fp-entry-size {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+    }
+
+    .fp-entry.selected .fp-entry-size {
+      color: rgba(255, 255, 255, 0.75);
+    }
+
+    .fp-selected-path {
+      font-size: 12.5px;
+      color: var(--text-dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+    }
+
     .modal-header {
       display: flex;
       align-items: center;
@@ -819,99 +1015,9 @@
       flex-shrink: 0;
     }
 
-    .workdir-path-row {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-
-    .workdir-path-row input {
-      flex: 1;
-      padding: 9px 12px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--sidebar-bg);
-      color: var(--text);
-      font-size: 13.5px;
-      font-family: "SF Mono", Menlo, Consolas, monospace;
-      outline: none;
-    }
-
-    .workdir-path-row input:focus {
-      border-color: var(--accent);
-    }
-
-    .workdir-path-row button {
-      padding: 9px 16px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--sidebar-bg);
-      color: var(--text);
-      font-size: 13.5px;
-      font-weight: 500;
-      cursor: pointer;
-    }
-
-    .workdir-path-row button:hover {
-      background: var(--border);
-    }
-
-    .workdir-breadcrumbs {
-      font-size: 13px;
-      color: var(--text-dim);
-      margin-bottom: 10px;
-      word-break: break-all;
-      line-height: 1.6;
-    }
-
-    .workdir-breadcrumbs .crumb {
-      cursor: pointer;
-    }
-
-    .workdir-breadcrumbs .crumb:hover {
-      color: var(--accent);
-      text-decoration: underline;
-    }
-
-    .workdir-breadcrumbs .crumb-sep {
-      padding: 0 2px;
-    }
-
-    .workdir-list {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      overflow: hidden;
-      max-height: 320px;
-      overflow-y: auto;
-    }
-
-    .workdir-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 14px;
-      font-size: 14px;
-      cursor: pointer;
-      border-bottom: 1px solid var(--border);
-      transition: background 0.15s;
-    }
-
-    .workdir-item:last-child {
-      border-bottom: none;
-    }
-
-    .workdir-item:hover {
-      background: var(--sidebar-bg);
-    }
-
-    .workdir-item .folder-icon {
-      flex-shrink: 0;
-      opacity: 0.8;
-    }
-
-    .workdir-loading,
-    .workdir-empty {
-      padding: 20px;
+    .fp-loading,
+    .fp-empty {
+      padding: 24px 12px;
       text-align: center;
       color: var(--text-dim);
       font-size: 13.5px;
@@ -1045,14 +1151,21 @@
         </div>
       </div>
 
-      <!-- Local working-directory picker modal: lets the agent's
-           read_file/write_file/list_directory/view_image tools operate on
-           a real folder on disk, alongside (not instead of) one-off
-           uploaded-file attachments handled by doc-file-input below. -->
+      <!-- Local working-directory picker: a file-manager-style modal (address
+           bar, back/up navigation, a sidebar of quick-access locations,
+           folders and files listed like a real file browser) that lets the
+           agent's read_file/write_file/list_directory/view_image tools
+           operate on a real folder on disk, alongside (not instead of)
+           one-off uploaded-file attachments handled by doc-file-input below.
+           A native OS folder dialog can't be used here: browsers never hand
+           a web page the real filesystem path of a picked folder, and the
+           agent's tools need that real path to read/write on disk -- so
+           this browses the server's filesystem instead, styled to feel
+           like Finder/Explorer. -->
       <div class="modal-overlay" id="workdir-modal-overlay" onclick="if (event.target === this) closeWorkdirModal()">
-        <div class="modal">
+        <div class="modal filepicker">
           <div class="modal-header">
-            <h3>Local folder access</h3>
+            <h3>Choose a folder for the agent</h3>
             <button class="icon-btn" onclick="closeWorkdirModal()" title="Close">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                 stroke-linejoin="round">
@@ -1061,22 +1174,43 @@
               </svg>
             </button>
           </div>
-          <div class="modal-body">
-            <div class="workdir-path-row">
-              <input type="text" id="workdir-path-input" placeholder="/path/to/folder"
-                onkeydown="if (event.key === 'Enter') { event.preventDefault(); browseWorkdir(document.getElementById('workdir-path-input').value); }">
-              <button onclick="browseWorkdir(document.getElementById('workdir-path-input').value)">Go</button>
-            </div>
-            <div class="workdir-breadcrumbs" id="workdir-breadcrumbs"></div>
-            <div class="workdir-list" id="workdir-list">
-              <div class="workdir-empty">Type a folder path above and press "Go" to browse it.</div>
-            </div>
-            <div id="workdir-error" style="display:none; color:var(--accent); font-size:13px; margin-top:10px;"></div>
+          <div class="fp-toolbar">
+            <button class="fp-nav-btn" id="fp-back-btn" onclick="fpGoBack()" title="Back">
+              <svg viewBox="0 0 24 24">
+                <path d="M19 12H5"></path>
+                <path d="M12 19l-7-7 7-7"></path>
+              </svg>
+            </button>
+            <button class="fp-nav-btn" id="fp-up-btn" onclick="fpGoUp()" title="Up one level">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 19V5"></path>
+                <path d="M5 12l7-7 7 7"></path>
+              </svg>
+            </button>
+            <input type="text" class="fp-addr" id="workdir-path-input" placeholder="/path/to/folder"
+              onkeydown="if (event.key === 'Enter') { event.preventDefault(); browseWorkdir(document.getElementById('workdir-path-input').value); }">
+            <button class="fp-nav-btn" onclick="browseWorkdir(document.getElementById('workdir-path-input').value)"
+              title="Go">
+              <svg viewBox="0 0 24 24">
+                <path d="M5 12h14"></path>
+                <path d="M13 6l6 6-6 6"></path>
+              </svg>
+            </button>
           </div>
+          <div class="fp-body">
+            <div class="fp-sidebar" id="fp-sidebar">
+              <div class="fp-sidebar-label">Quick access</div>
+              <!-- populated by loadFpRoots() -->
+            </div>
+            <div class="fp-main" id="workdir-list">
+              <div class="fp-empty">Loading…</div>
+            </div>
+          </div>
+          <div id="workdir-error" style="display:none; color:var(--accent); font-size:13px; padding:0 20px;"></div>
           <div class="modal-footer">
             <button class="modal-btn-secondary" id="workdir-clear-btn" onclick="clearWorkdirSelection()"
               style="display:none;">Remove folder access</button>
-            <div style="flex:1;"></div>
+            <div class="fp-selected-path" id="fp-selected-path" style="flex:1;"></div>
             <button class="modal-btn-secondary" onclick="closeWorkdirModal()">Cancel</button>
             <button class="modal-btn-primary" id="workdir-use-btn" onclick="useThisFolder()" disabled>Use this
               folder</button>
@@ -1151,27 +1285,35 @@
     // into a single message, while a workdir gives the agent's
     // read_file/write_file/list_directory/view_image tools standing access
     // to a real folder on disk for as long as the thread is active.
+    //
+    // The picker below is styled and behaves like a native OS file manager
+    // (address bar, back/up navigation, a sidebar of quick-access places,
+    // double-click to open a folder, single-click to select one without
+    // entering it) but it browses the SERVER's filesystem over /fs/browse.
+    // That's a deliberate choice, not a shortcut: a browser's native folder
+    // dialog (input[webkitdirectory], showDirectoryPicker()) is sandboxed
+    // and never returns the real absolute path of the folder a person
+    // picks, only a handle/relative names -- and the agent's file tools
+    // need a real path on disk to read and write through. Browsing the
+    // server's filesystem is the only way to get one.
     let activeWorkdir = null;     // path currently in effect for `threadId`, or null
     let pendingWorkdir = null;    // chosen before threadId exists (new chat) -- sent with the first message
-    let workdirBrowsePath = '';   // path currently shown in the picker modal
+    let workdirBrowsePath = '';   // folder currently open in the picker
     let workdirsByThread = JSON.parse(localStorage.getItem('workdirsByThread') || '{}');
+    let fpHistory = [];            // back-stack of previously opened folders
+    let fpSelectedPath = null;     // a single-clicked (highlighted, not entered) folder, if any
+    let fpRootsLoaded = false;
 
     function openWorkdirModal() {
       if (busy) return;
       document.getElementById('workdir-modal-overlay').classList.add('active');
       document.getElementById('workdir-clear-btn').style.display = (activeWorkdir || pendingWorkdir) ? '' : 'none';
-      const startPath = activeWorkdir || pendingWorkdir || '';
-      document.getElementById('workdir-path-input').value = startPath;
       document.getElementById('workdir-error').style.display = 'none';
-      if (startPath) {
-        browseWorkdir(startPath);
-      } else {
-        workdirBrowsePath = '';
-        document.getElementById('workdir-breadcrumbs').innerHTML = '';
-        document.getElementById('workdir-list').innerHTML =
-          '<div class="workdir-empty">Type a folder path above and press "Go" to browse it.</div>';
-        document.getElementById('workdir-use-btn').disabled = true;
-      }
+      fpHistory = [];
+      fpSelectedPath = null;
+      if (!fpRootsLoaded) loadFpRoots();
+      const startPath = activeWorkdir || pendingWorkdir || '';
+      browseWorkdir(startPath, { pushHistory: false });
     }
 
     function closeWorkdirModal() {
@@ -1184,12 +1326,57 @@
       el.style.display = msg ? 'block' : 'none';
     }
 
-    async function browseWorkdir(path) {
+    async function loadFpRoots() {
+      const sidebar = document.getElementById('fp-sidebar');
+      try {
+        const res = await fetch(`${API_BASE}/fs/roots`);
+        const data = res.ok ? await res.json() : { roots: [] };
+        fpRootsLoaded = true;
+        renderFpSidebar(data.roots || []);
+      } catch (e) {
+        fpRootsLoaded = true;
+        renderFpSidebar([]);
+      }
+    }
+
+    function renderFpSidebar(roots) {
+      const sidebar = document.getElementById('fp-sidebar');
+      const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+      let html = '<div class="fp-sidebar-label">Quick access</div>';
+      roots.forEach(r => {
+        html += `<div class="fp-sidebar-item" onclick="browseWorkdir('${r.path.replace(/'/g, "\\'")}')" title="${escapeHtml(r.path)}">${folderIcon}<span>${escapeHtml(r.name)}</span></div>`;
+      });
+
+      // Recently-used working directories (from other threads), most recent first, deduped.
+      const recents = [...new Set(Object.values(workdirsByThread))].filter(p => !roots.some(r => r.path === p)).slice(0, 5);
+      if (recents.length) {
+        html += '<div class="fp-sidebar-label" style="margin-top:10px;">Recent</div>';
+        recents.forEach(p => {
+          const label = p.split(/[\\/]/).filter(Boolean).pop() || p;
+          html += `<div class="fp-sidebar-item" onclick="browseWorkdir('${p.replace(/'/g, "\\'")}')" title="${escapeHtml(p)}">${folderIcon}<span>${escapeHtml(label)}</span></div>`;
+        });
+      }
+      sidebar.innerHTML = html;
+    }
+
+    function fmtSize(bytes) {
+      if (bytes === null || bytes === undefined) return '';
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    async function browseWorkdir(path, opts) {
+      opts = opts || {};
       const list = document.getElementById('workdir-list');
       const useBtn = document.getElementById('workdir-use-btn');
+      const backBtn = document.getElementById('fp-back-btn');
+      const upBtn = document.getElementById('fp-up-btn');
       showWorkdirError('');
-      list.innerHTML = '<div class="workdir-loading">Loading…</div>';
+      list.innerHTML = '<div class="fp-loading">Loading…</div>';
       useBtn.disabled = true;
+      fpSelectedPath = null;
+      updateFpSelectedFooter();
       try {
         const res = await fetch(`${API_BASE}/fs/browse?path=${encodeURIComponent(path || '')}`);
         if (!res.ok) {
@@ -1197,51 +1384,82 @@
           throw new Error(err.detail || err.error || `Can't open that folder (${res.status}).`);
         }
         const data = await res.json();
+        if (opts.pushHistory !== false && workdirBrowsePath && workdirBrowsePath !== (data.path || '')) {
+          fpHistory.push(workdirBrowsePath);
+        }
         workdirBrowsePath = data.path || path || '';
         document.getElementById('workdir-path-input').value = workdirBrowsePath;
-        renderWorkdirBreadcrumbs(workdirBrowsePath);
-        const dirs = (data.entries || []).filter(e => e.is_dir);
-        if (dirs.length === 0) {
-          list.innerHTML = '<div class="workdir-empty">No subfolders here.</div>';
+        backBtn.disabled = fpHistory.length === 0;
+        upBtn.disabled = !data.parent;
+        upBtn.dataset.parent = data.parent || '';
+
+        const entries = data.entries || [];
+        if (entries.length === 0) {
+          list.innerHTML = '<div class="fp-empty">This folder is empty.</div>';
         } else {
+          const folderIcon = '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+          const fileIcon = '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
           list.innerHTML = '';
-          dirs.forEach(entry => {
+          entries.forEach(entry => {
             const row = document.createElement('div');
-            row.className = 'workdir-item';
-            row.innerHTML = `<svg class="folder-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>${escapeHtml(entry.name)}</span>`;
-            row.onclick = () => browseWorkdir(entry.path);
+            row.className = 'fp-entry' + (entry.is_dir ? '' : ' is-file');
+            row.dataset.path = entry.path;
+            row.innerHTML = `<span class="fp-entry-icon">${entry.is_dir ? folderIcon : fileIcon}</span>` +
+              `<span class="fp-entry-name">${escapeHtml(entry.name)}</span>` +
+              (entry.is_dir ? '' : `<span class="fp-entry-size">${fmtSize(entry.size_bytes)}</span>`);
+            if (entry.is_dir) {
+              row.onclick = () => selectFpEntry(row, entry.path);
+              row.ondblclick = () => browseWorkdir(entry.path);
+            }
             list.appendChild(row);
           });
         }
         useBtn.disabled = false;
+        updateFpSelectedFooter();
       } catch (err) {
-        list.innerHTML = '<div class="workdir-empty">Couldn\'t browse — you can still type an exact path above and select "Use this folder".</div>';
+        list.innerHTML = '<div class="fp-empty">Couldn\'t browse — you can still type an exact path above and press Enter.</div>';
         // Browsing failing (e.g. no /fs/browse route) shouldn't block picking
         // a path outright -- the path still gets validated server-side when used.
         workdirBrowsePath = path || '';
+        backBtn.disabled = fpHistory.length === 0;
+        upBtn.disabled = true;
         useBtn.disabled = !workdirBrowsePath;
+        updateFpSelectedFooter();
       }
     }
 
-    function renderWorkdirBreadcrumbs(path) {
-      const el = document.getElementById('workdir-breadcrumbs');
-      const parts = path.split('/').filter(Boolean);
-      let acc = path.startsWith('/') ? '' : '';
-      const crumbs = [];
-      if (path.startsWith('/')) {
-        crumbs.push({ label: '/', path: '/' });
+    function selectFpEntry(rowEl, path) {
+      document.querySelectorAll('#workdir-list .fp-entry.selected').forEach(el => el.classList.remove('selected'));
+      if (fpSelectedPath === path) {
+        // clicking the already-selected folder again deselects it
+        fpSelectedPath = null;
+      } else {
+        fpSelectedPath = path;
+        rowEl.classList.add('selected');
       }
-      parts.forEach((part, i) => {
-        acc = (path.startsWith('/') ? '/' : '') + parts.slice(0, i + 1).join('/');
-        crumbs.push({ label: part, path: acc });
-      });
-      el.innerHTML = crumbs.map((c, i) =>
-        `<span class="crumb" onclick="browseWorkdir('${c.path.replace(/'/g, "\\'")}')">${escapeHtml(c.label)}</span>${i < crumbs.length - 1 ? '<span class="crumb-sep">/</span>' : ''}`
-      ).join('');
+      updateFpSelectedFooter();
+    }
+
+    function updateFpSelectedFooter() {
+      const el = document.getElementById('fp-selected-path');
+      el.textContent = fpSelectedPath || workdirBrowsePath || '';
+    }
+
+    function fpGoBack() {
+      if (!fpHistory.length) return;
+      const prev = fpHistory.pop();
+      browseWorkdir(prev, { pushHistory: false });
+    }
+
+    function fpGoUp() {
+      const parent = document.getElementById('fp-up-btn').dataset.parent;
+      if (parent) browseWorkdir(parent);
     }
 
     async function useThisFolder() {
-      const path = (document.getElementById('workdir-path-input').value || workdirBrowsePath || '').trim();
+      // A highlighted (single-clicked) folder wins over the folder
+      // currently open, matching how native folder pickers behave.
+      const path = (fpSelectedPath || document.getElementById('workdir-path-input').value || workdirBrowsePath || '').trim();
       if (!path) return;
 
       if (!threadId) {

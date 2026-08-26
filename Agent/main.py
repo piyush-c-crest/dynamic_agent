@@ -76,35 +76,78 @@ def thread_messages(thread_id: str):
     return {"thread_id": thread_id, "messages": agent_manager.get_thread_history(thread_id)}
 
 
-# ---------- working directory (Cowork-style folder picker) ----------
-# The picker in the UI is an in-app folder browser (not a native OS dialog --
-# browsers don't expose real filesystem paths from `<input type=file>`), so
-# /fs/browse drives that: it lists only subdirectories of a server-side
-# path, for the user to navigate and pick from.
+# ---------- working directory (native-file-manager-style folder picker) ----------
+# Browsers don't expose real OS filesystem paths from a native picker --
+# `<input type=file webkitdirectory>` and the File System Access API's
+# showDirectoryPicker() are both sandboxed and never hand back an absolute
+# path a server process can open. Since the agent's file tools operate on
+# real paths on the server's disk, the only way to select one is to browse
+# the server's filesystem from the UI. /fs/browse and /fs/roots back a
+# picker modal built to look and behave like a native file manager (address
+# bar, up/back navigation, a sidebar of quick-access locations, folders you
+# double-click into and single-click to select, files shown for context).
 
 @app.get("/fs/browse")
 def browse_workdir(path: str | None = None):
-    """List subdirectories of `path` for the folder-picker UI. Defaults to
-    the server's home directory. Only directories are returned -- files
-    aren't relevant to picking a working directory -- but each entry is
-    still tagged is_dir so the UI's generic filtering works."""
+    """List the contents of `path` for the folder-picker UI. Defaults to
+    the server's home directory. Both subdirectories and files are
+    returned -- files are shown (but not selectable as a working directory)
+    so the picker reads like a real file manager rather than a bare folder
+    tree. Hidden entries (dotfiles) are omitted."""
     base = Path(path).expanduser().resolve() if path else Path.home().resolve()
     if not base.exists() or not base.is_dir():
         raise HTTPException(status_code=404, detail=f"Not a directory: {base}")
 
     try:
-        entries = sorted(
-            (p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
-            key=lambda p: p.name.lower(),
-        )
+        raw_entries = [p for p in base.iterdir() if not p.name.startswith(".")]
     except PermissionError:
-        entries = []
+        raw_entries = []
+
+    # Folders first, then files, each alphabetically -- standard file-manager sort.
+    raw_entries.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
+
+    entries = []
+    for p in raw_entries:
+        try:
+            is_dir = p.is_dir()
+            entry = {"name": p.name, "path": str(p), "is_dir": is_dir}
+            if not is_dir:
+                try:
+                    entry["size_bytes"] = p.stat().st_size
+                except OSError:
+                    entry["size_bytes"] = None
+            entries.append(entry)
+        except OSError:
+            continue  # broken symlink or similar -- skip rather than fail the whole listing
 
     return {
         "path": str(base),
         "parent": str(base.parent) if base != base.parent else None,
-        "entries": [{"name": p.name, "path": str(p), "is_dir": True} for p in entries],
+        "entries": entries,
     }
+
+
+@app.get("/fs/roots")
+def fs_roots():
+    """Quick-access locations for the folder-picker sidebar: home directory,
+    the agent's default workspace, and filesystem root(s) -- drive letters
+    on Windows, `/` elsewhere."""
+    roots = [{"name": "Home", "path": str(Path.home().resolve())}]
+
+    default_ws = str(DEFAULT_AGENT_WORKDIR)
+    if default_ws != roots[0]["path"]:
+        roots.append({"name": "Agent workspace", "path": default_ws})
+
+    if os.name == "nt":
+        import string
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                roots.append({"name": drive, "path": drive})
+    else:
+        roots.append({"name": "Computer", "path": "/"})
+
+    return {"roots": roots}
 
 
 @app.get("/workdir")
