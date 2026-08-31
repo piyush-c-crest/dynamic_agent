@@ -1,46 +1,134 @@
-from langgraph.graph import StateGraph, START, END
-from typing import TypedDict, Annotated, Any, Callable
-from langchain_core.messages import (
-    BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage,
-)
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph.message import add_messages
-from langchain_community.utilities import GoogleSerperAPIWrapper
-from langchain_core.tools import tool, Tool, BaseTool
-from dotenv import load_dotenv
+"""
+dynamic_langgraph_backend.py
+============================
+Core orchestration engine for the Dynamic Agent system ("Crest").
+
+Architecture Overview
+---------------------
+This file is the ENTRY POINT for the orchestration logic. It wires together
+all the sub-modules and defines the LangGraph state machine that drives
+multi-agent task execution.
+
+  document_pipeline.py   -- upload ingestion, text extraction, multimodal
+                            message construction, document store
+  logging_utils.py       -- colored structured logging (_log, _log_block,
+                            LOG_FILE_PATH) -- import this, not logging directly
+  path_utils.py          -- workdir confinement (resolve_and_confine,
+                            current_workdir, PathConfinementError, etc.)
+  sandbox.py             -- ToolSandboxExecutor: runs generated tool code in
+                            an isolated venv + subprocess so broken tools
+                            cannot crash or hang the main process
+  artifact_builder.py    -- format converters (_md_to_docx, _build_pptx,
+                            _ARTIFACT_KINDS) for the create_artifact tool
+
+Orchestration Graph
+-------------------
+  START
+    -> planner          (LLM: break goal into atomic tasks)
+    -> agent_executor   (LLM: run one task, optionally call tools)
+    <- tools            (custom executor: invoke registered tools)
+    -> evaluator        (LLM: PASS / RETRY verdict)
+    -> assembler        (LLM: merge all task results into final answer)
+  END
+
+Key Classes
+-----------
+  DynamicToolRegistry    -- manages built-in + generated tools; owns the
+                            ToolSandboxExecutor for generated tool execution
+  DynamicAgentFactory    -- creates / caches per-role sub-agents; drives
+                            LLM-based tool selection and auto-tool creation
+  DynamicAgentManager    -- owns the compiled LangGraph; exposes run(),
+                            set_working_directory(), remove_tool(), etc.
+
+Public API (used by main.py / FastAPI routes)
+---------------------------------------------
+  run_agent_with_requirements(user_input, thread_id, requirements, doc_ids, workdir)
+  upload_file(filename, data)         -> doc_id
+  add_tool_dynamically(name, prompt)  -> bool
+  remove_tool_dynamically(name)       -> bool
+  select_working_directory(tid, path) -> dict
+  get_working_directory(tid)          -> str
+  clear_working_directory(tid)
+  get_agent_tools()                   -> JSON str
+  get_agent_registry()                -> JSON str
+  get_artifacts()                     -> list[dict]
+
+Configuration (see constants below)
+-------------------------------------
+  MAX_RETRIES               -- evaluator retry budget per task
+  MAX_TASKS                 -- planner task cap
+  AUTO_TOOL_LIMIT           -- max new tools auto-created per agent turn
+  MAX_TOOL_VALIDATION_RETRIES -- repair attempts for a failing generated tool
+  MAX_TOOL_CALLS_PER_TASK   -- hard cap on consecutive tool calls per task
+  MAX_READ_CHARS            -- read_file output cap (chars)
+  MAX_LIST_ENTRIES          -- list_directory entry cap
+"""
+
+# ---------------------------------------------------------------------------
+# Standard library
+# ---------------------------------------------------------------------------
 import os
-import sys
-import sqlite3
-import requests
 import json
 import re
 import base64
 import uuid
 import operator
 import contextvars
-import subprocess
-import venv
+import sqlite3
 from pathlib import Path
 from datetime import datetime
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import StructuredTool
-from pydantic import create_model, Field
-from langsmith import traceable
+from typing import TypedDict, Annotated, Any
 
+# ---------------------------------------------------------------------------
+# Third-party: LangChain / LangGraph / LangSmith
+# ---------------------------------------------------------------------------
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph.message import add_messages
+from langchain_core.messages import (
+    BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage,
+)
+from langchain_core.tools import tool, BaseTool, StructuredTool
+from langchain_community.utilities import GoogleSerperAPIWrapper
+from langchain_openai import ChatOpenAI
+from langsmith import traceable
+from pydantic import create_model, Field
+from dotenv import load_dotenv
+import requests
+
+# ---------------------------------------------------------------------------
+# Local sub-modules (extracted from this file -- see module docstrings)
+# ---------------------------------------------------------------------------
 import document_pipeline as docpipe
 
+# Logging: _log / _log_block / LOG_FILE_PATH
+# (also sets up the Tee so stdout/stderr are mirrored to a .log file)
+from logging_utils import _log, _log_block, LOG_FILE_PATH, _Ansi
+
+# Path confinement: resolve_and_confine, current_workdir, etc.
+from path_utils import (
+    resolve_and_confine,
+    current_workdir,
+    current_artifacts_dir,
+    PathConfinementError,
+    WorkdirSelectionError,
+    _path_touches_agent_data,
+    _APP_DATA_ERROR,
+    DEFAULT_AGENT_WORKDIR,
+    _workdir_ctx,
+)
+
+# Isolated subprocess sandbox for generated tools
+from sandbox import ToolSandboxExecutor
+
+# Document / presentation format converters
+from artifact_builder import _md_to_docx, _build_pptx, _ARTIFACT_KINDS
+
+# Optional weasyprint + markdown for PDF artifact support
 try:
     import markdown as _markdown
 except ImportError:
     _markdown = None
-try:
-    from docx import Document as _DocxDocument
-except ImportError:
-    _DocxDocument = None
-try:
-    from pptx import Presentation as _PptxPresentation
-except ImportError:
-    _PptxPresentation = None
 try:
     import weasyprint as _weasyprint
 except ImportError:
@@ -48,164 +136,11 @@ except ImportError:
 
 load_dotenv()
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+# ---------------------------------------------------------------------------
+# LangSmith tracing configuration
+# ---------------------------------------------------------------------------
 
-class _Ansi:
-    """ANSI styles used for human-readable terminal logs.
-
-    The log file always has these styles removed, so it remains easy to grep,
-    copy into an issue, or parse with a log collector.
-    """
-
-    RESET = "\033[0m"
-    DIM = "\033[2m"
-    BOLD = "\033[1m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-
-
-_LOG_TAG_COLORS = {
-    "SYSTEM": _Ansi.CYAN,
-    "WORKFLOW": _Ansi.BLUE,
-    "AI-REQUEST": _Ansi.MAGENTA,
-    "AI-REPLY": _Ansi.CYAN,
-    "TOOL-CALL": _Ansi.YELLOW,
-    "TOOL-RESULT": _Ansi.GREEN,
-    "TOOL-CREATION": _Ansi.MAGENTA,
-    "REGISTRY": _Ansi.CYAN,
-    "SANDBOX": _Ansi.BLUE,
-    "AGENT": _Ansi.BLUE,
-    "FILESYSTEM": _Ansi.CYAN,
-    "TOKEN-USAGE": _Ansi.YELLOW,
-    "FINAL-RESPONSE": _Ansi.GREEN,
-    "WARNING": _Ansi.YELLOW,
-    "ERROR": _Ansi.RED,
-}
-
-
-def _use_color() -> bool:
-    """Enable colors for interactive terminals; override with LOG_COLOR.
-
-    Set LOG_COLOR=always to force colors or LOG_COLOR=never (or NO_COLOR) to
-    disable them. The file mirror is always plain text regardless.
-    """
-    setting = os.environ.get("LOG_COLOR", "auto").lower()
-    if os.environ.get("NO_COLOR") is not None or setting == "never":
-        return False
-    if setting == "always":
-        return True
-    return bool(getattr(sys.__stdout__, "isatty", lambda: False)())
-
-
-def _paint(text: str, color: str = "", *, bold: bool = False, dim: bool = False) -> str:
-    if not _use_color() or not color:
-        return text
-    prefix = color
-    if bold:
-        prefix += _Ansi.BOLD
-    if dim:
-        prefix += _Ansi.DIM
-    return f"{prefix}{text}{_Ansi.RESET}"
-
-
-class _Tee:
-    """Mirrors terminal output to a plain-text log file.
-
-    ANSI escapes stay in the terminal but are stripped before writing to the
-    file. This preserves colored debugging locally without corrupting saved
-    logs with escape codes.
-    """
-    def __init__(self, console_stream, log_stream):
-        self.console_stream = console_stream
-        self.log_stream = log_stream
-
-    def write(self, data):
-        try:
-            self.console_stream.write(data)
-            self.console_stream.flush()
-        except Exception:
-            pass  # never let a logging failure break the app
-        try:
-            self.log_stream.write(_ANSI_ESCAPE_RE.sub("", data))
-            self.log_stream.flush()
-        except Exception:
-            pass
-
-    def flush(self):
-        for stream in (self.console_stream, self.log_stream):
-            try:
-                stream.flush()
-            except Exception:
-                pass
-
-    def isatty(self):
-        return bool(getattr(self.console_stream, "isatty", lambda: False)())
-
-
-def _setup_console_logging(log_dir: str = "logs") -> str:
-    """Redirect stdout/stderr so everything printed to the terminal is also written to a file."""
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    log_file = open(log_path, "a", encoding="utf-8")  # utf-8 to safely hold any generated content
-    sys.stdout = _Tee(sys.stdout, log_file)
-    sys.stderr = _Tee(sys.stderr, log_file)
-    return log_path
-
-
-LOG_FILE_PATH = _setup_console_logging()
-
-
-def _format_log_value(value: Any, max_chars: int = 300) -> str:
-    """Render an inline field predictably without letting it flood a log line."""
-    if isinstance(value, str):
-        rendered = value
-    else:
-        try:
-            rendered = json.dumps(value, default=str, ensure_ascii=False)
-        except (TypeError, ValueError):
-            rendered = str(value)
-    rendered = re.sub(r"\s+", " ", rendered).strip()
-    if len(rendered) > max_chars:
-        rendered = f"{rendered[:max_chars - 1]}…"
-    return repr(rendered) if isinstance(value, str) else rendered
-
-
-def _log(tag: str, msg: str = "", **fields: Any) -> None:
-    """Write one colored, structured event to the console and plain log file.
-
-    Example: ``[12:34:56.789] [TOOL-CALL] invoke | tool="search" task="T1"``.
-    Keep values in ``fields`` rather than interpolating them into ``msg`` so
-    important context can be scanned consistently across the entire run.
-    """
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    tag_text = f"[{tag:<14}]"
-    colored_tag = _paint(tag_text, _LOG_TAG_COLORS.get(tag, _Ansi.CYAN), bold=True)
-    context = (
-        " | " + " ".join(f"{key}={_format_log_value(value)}" for key, value in fields.items())
-        if fields else ""
-    )
-    print(f"{_paint(f'[{ts}]', _Ansi.DIM)} {colored_tag} {msg}{_paint(context, _Ansi.DIM)}")
-
-
-def _log_block(tag: str, title: str, body: str, max_chars: int = 2000) -> None:
-    """Same as _log but for multi-line payloads (prompts, AI replies, tool
-    output) -- prints a header line followed by the (possibly truncated)
-    body so long content doesn't spam the single-line log stream."""
-    body = body if body is not None else ""
-    truncated = len(body) > max_chars
-    shown = body[:max_chars] + (f"\n... [truncated, {len(body) - max_chars} more chars]" if truncated else "")
-    _log(tag, f"BEGIN {title}", chars=len(body), truncated=truncated)
-    for line in shown.splitlines() or [""]:
-        print(_paint(f"    │ {line}", _Ansi.DIM))
-    _log(tag, f"END {title}")
-
-
-_log("SYSTEM", "Structured logging initialized", log_file=LOG_FILE_PATH, color_mode=os.environ.get("LOG_COLOR", "auto"))
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
@@ -219,7 +154,7 @@ MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its smoke test
-MAX_TOOL_CALLS_PER_TASK = 3  # max consecutive tool calls per task to prevent infinite loops
+MAX_TOOL_CALLS_PER_TASK = 10  # max consecutive tool calls per task to prevent infinite loops
 MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
 MAX_LIST_ENTRIES = 500
 
@@ -227,63 +162,7 @@ llm = ChatOpenAI(
     model="openai.gpt-oss-120b"
 )
 
-DEFAULT_AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", os.path.join(os.getcwd(), "agent_workspace"))).resolve()
-DEFAULT_AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
 
-_workdir_ctx: contextvars.ContextVar[Path | None] = contextvars.ContextVar("workdir_ctx", default=None)
-
-
-def current_workdir() -> Path:
-    """The workdir tools should confine themselves to for the run currently
-    in progress: the thread's selected cowork folder if one is set, else
-    DEFAULT_AGENT_WORKDIR."""
-    return _workdir_ctx.get() or DEFAULT_AGENT_WORKDIR
-
-
-def current_artifacts_dir() -> Path:
-    """Artifacts live inside a `.artifacts` folder of whichever workdir is
-    active, so a report the agent creates while cowork'd into a user's
-    folder actually shows up there, rather than always landing in the
-    default workspace."""
-    d = current_workdir() / ".artifacts"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-_AGENT_DATA_DIR_NAMES = ("DB", "tool_envs", "tools", "logs")
-
-
-def _agent_data_roots() -> list[Path]:
-    return [Path(name).resolve() for name in _AGENT_DATA_DIR_NAMES]
-
-
-class PathConfinementError(Exception):
-    """Raised when a tool-requested path would escape the active workdir."""
-
-
-class WorkdirSelectionError(Exception):
-    """Raised when a user-requested working directory is invalid or refused."""
-
-
-def resolve_and_confine(path_str: str | None, base: Path = None) -> Path:
-    """Canonicalize a path relative to `base` (default: the active workdir)
-    and reject any escape (via '..' or a symlink) outside it."""
-    base = (base or current_workdir()).resolve()
-    candidate = (base / path_str) if path_str else base
-    resolved = candidate.resolve()
-    if not (resolved == base or resolved.is_relative_to(base)):
-        raise PathConfinementError(f"Path escapes the agent workdir ({base}): {path_str!r}")
-    return resolved
-
-
-def _path_touches_agent_data(path: Path) -> bool:
-    return any(path == root or path.is_relative_to(root) for root in _agent_data_roots())
-
-
-_APP_DATA_ERROR = (
-    "Refused: this path is inside the application's internal data directory "
-    "(DB, tool_envs, tools, logs) -- never a target for agent file operations."
-)
 
 def _as_text(content) -> str:
     """Extract plain text from a BaseMessage.content, which is normally a
@@ -395,241 +274,6 @@ def _format_conversation_history(history: list[dict], max_turns: int = MAX_HISTO
     recent = history[-max_turns:]
     lines = [f"{turn.get('role', 'user').capitalize()}: {turn.get('content', '')}" for turn in recent]
     return "\n".join(lines)
-
-
-_SANDBOX_RUNNER_SOURCE = '''
-import sys, json, importlib.util
-
-def main():
-    module_path, func_name = sys.argv[1], sys.argv[2]
-    kwargs = json.loads(sys.stdin.read() or "{}")
-
-    spec = importlib.util.spec_from_file_location("generated_tool_module", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    target = getattr(module, func_name)
-    result = target(**kwargs)
-
-    print(json.dumps({"ok": True, "result": result}, default=str))
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))
-        sys.exit(1)
-'''
-
-
-class ToolSandboxExecutor:
-    """
-    Runs every dynamically created tool's generated code through ONE shared
-    venv + a subprocess per call, so tool code can `import` any pip package
-    without the main process ever needing that package (or being able to be
-    crashed/hung by broken generated code).
-
-    Trade-off vs a venv per tool: one shared site-packages means two tools
-    that need conflicting versions of the same package can step on each
-    other. Acceptable for an initial build where AUTO_TOOL_LIMIT already
-    caps tool creation; if that ever bites, give just the conflicting tool
-    its own venv (base_dir=f"tool_envs/{tool_name}") rather than switching
-    the whole system over.
-    """
-
-    def __init__(self, base_dir: str = "tool_envs/shared", timeout_s: int = 25, install_timeout_s: int = 180):
-        self.base_dir = base_dir
-        self.timeout_s = timeout_s
-        self.install_timeout_s = install_timeout_s
-        self.tools_dir = os.path.join(base_dir, "tools")
-        os.makedirs(self.tools_dir, exist_ok=True)
-
-        self._runner_path = os.path.join(base_dir, "_sandbox_runner.py")
-        with open(self._runner_path, "w", encoding="utf-8") as f:
-            f.write(_SANDBOX_RUNNER_SOURCE)
-
-        self._venv_dir = os.path.join(base_dir, "venv")
-        self._installed_cache_path = os.path.join(base_dir, "_installed.json")
-        self._installed: set[str] = set()
-        self._load_installed_cache()
-
-    def _venv_python(self) -> str:
-        rel = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
-        return os.path.join(self._venv_dir, *rel)
-
-    def _module_path(self, tool_name: str) -> str:
-        return os.path.join(self.tools_dir, f"{tool_name}.py")
-
-    def _load_installed_cache(self):
-        if os.path.exists(self._installed_cache_path):
-            try:
-                with open(self._installed_cache_path, "r", encoding="utf-8") as f:
-                    self._installed = set(json.load(f))
-            except (json.JSONDecodeError, OSError):
-                self._installed = set()
-
-    def _save_installed_cache(self):
-        with open(self._installed_cache_path, "w", encoding="utf-8") as f:
-            json.dump(sorted(self._installed), f)
-
-    def ensure_env(self, tool_name: str, requirements: list[str] | None = None):
-        """Create the shared venv on first use, then install only the packages not already present."""
-        if not os.path.exists(self._venv_dir):
-            _log("SANDBOX", "Creating shared tool virtual environment", tool=tool_name, path=self._venv_dir)
-            venv.EnvBuilder(with_pip=True, clear=True).create(self._venv_dir)
-
-        missing = [r for r in (requirements or []) if r.lower() not in self._installed]
-        if missing:
-            _log("SANDBOX", "Installing tool dependencies", tool=tool_name, packages=missing)
-            proc = subprocess.run(
-                [self._venv_python(), "-m", "pip", "install", "-q",
-                 "--disable-pip-version-check", *missing],
-                capture_output=True, text=True, timeout=self.install_timeout_s,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to install requirements for tool '{tool_name}': {proc.stderr[-800:]}"
-                )
-            self._installed.update(r.lower() for r in missing)
-            self._save_installed_cache()
-        elif requirements:
-            _log("SANDBOX", "Dependencies already available; install skipped", tool=tool_name, packages=requirements)
-
-    def save_tool_module(self, tool_name: str, code: str) -> str:
-        """Persist the generated (import-allowed) source into the shared tools folder."""
-        path = self._module_path(tool_name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(code)
-        return path
-
-    def run(self, tool_name: str, func_name: str, kwargs: dict) -> Any:
-        module_path = self._module_path(tool_name)
-        try:
-            proc = subprocess.run(
-                [self._venv_python(), self._runner_path, module_path, func_name],
-                input=json.dumps(kwargs),
-                capture_output=True, text=True, timeout=self.timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"Tool '{tool_name}' timed out after {self.timeout_s}s")
-
-        if not proc.stdout.strip():
-            raise RuntimeError(f"Tool '{tool_name}' produced no output. stderr: {proc.stderr[-800:]}")
-
-        try:
-            payload = json.loads(proc.stdout.strip().splitlines()[-1])
-        except json.JSONDecodeError:
-            raise RuntimeError(f"Tool '{tool_name}' returned non-JSON output: {proc.stdout[-800:]}")
-
-        if not payload.get("ok"):
-            raise RuntimeError(f"Tool '{tool_name}' error: {payload.get('error')}")
-        return payload["result"]
-
-
-_ARTIFACT_KINDS = {"doc", "pdf", "slides", "image"}
-
-_INLINE_MD_RE = re.compile(
-    r"\*\*(?P<bold1>.+?)\*\*"
-    r"|__(?P<bold2>.+?)__"
-    r"|\*(?P<italic1>.+?)\*"
-    r"|_(?P<italic2>.+?)_"
-    r"|`(?P<code>.+?)`"
-)
-
-
-def _add_inline_runs(paragraph, text: str) -> None:
-    """Splits a line on inline markdown (bold/italic/code) into styled runs
-    so a downloaded .docx shows real bold/italic instead of literal '**x**'."""
-    pos = 0
-    for match in _INLINE_MD_RE.finditer(text):
-        if match.start() > pos:
-            paragraph.add_run(text[pos:match.start()])
-        if match.group("bold1") is not None:
-            paragraph.add_run(match.group("bold1")).bold = True
-        elif match.group("bold2") is not None:
-            paragraph.add_run(match.group("bold2")).bold = True
-        elif match.group("italic1") is not None:
-            paragraph.add_run(match.group("italic1")).italic = True
-        elif match.group("italic2") is not None:
-            paragraph.add_run(match.group("italic2")).italic = True
-        elif match.group("code") is not None:
-            paragraph.add_run(match.group("code")).font.name = "Courier New"
-        pos = match.end()
-    if pos < len(text) or pos == 0:
-        paragraph.add_run(text[pos:])
-
-
-def _parse_md_table_row(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-def _is_md_table_separator(line: str) -> bool:
-    cells = _parse_md_table_row(line)
-    return bool(cells) and all(re.fullmatch(r":?-+:?", c) for c in cells)
-
-
-def _add_docx_table(document, header: list[str], rows: list[list[str]]) -> None:
-    table = document.add_table(rows=1 + len(rows), cols=len(header))
-    table.style = "Table Grid"
-    for col, text in enumerate(header):
-        paragraph = table.rows[0].cells[col].paragraphs[0]
-        _add_inline_runs(paragraph, text)
-        for run in paragraph.runs:
-            run.bold = True
-    for r, row in enumerate(rows, start=1):
-        for col, text in enumerate(row):
-            if col < len(header):
-                _add_inline_runs(table.rows[r].cells[col].paragraphs[0], text)
-
-
-def _md_to_docx(content: str):
-    """Small, deliberately non-exhaustive Markdown -> docx converter: enough
-    structure for agent-authored reports (headings, bullets, paragraphs,
-    tables, inline bold/italic/code), not a full CommonMark implementation."""
-    document = _DocxDocument()
-    lines = content.splitlines()
-    i = 0
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if not stripped:
-            i += 1
-            continue
-        if stripped.startswith("|") and i + 1 < len(lines) and _is_md_table_separator(lines[i + 1]):
-            header = _parse_md_table_row(stripped)
-            i += 2
-            rows = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                rows.append(_parse_md_table_row(lines[i]))
-                i += 1
-            _add_docx_table(document, header, rows)
-            continue
-        if stripped.startswith("### "):
-            _add_inline_runs(document.add_heading("", level=3), stripped[4:])
-        elif stripped.startswith("## "):
-            _add_inline_runs(document.add_heading("", level=2), stripped[3:])
-        elif stripped.startswith("# "):
-            _add_inline_runs(document.add_heading("", level=1), stripped[2:])
-        elif stripped.startswith(("- ", "* ")):
-            _add_inline_runs(document.add_paragraph(style="List Bullet"), stripped[2:])
-        else:
-            _add_inline_runs(document.add_paragraph(), stripped)
-        i += 1
-    return document
-
-
-def _build_pptx(slides: list[dict]):
-    presentation = _PptxPresentation()
-    layout = presentation.slide_layouts[1]  # "Title and Content"
-    for entry in slides:
-        slide = presentation.slides.add_slide(layout)
-        slide.shapes.title.text = entry["title"]
-        bullets = entry.get("bullets") or []
-        if bullets:
-            body = slide.placeholders[1].text_frame
-            body.text = bullets[0]
-            for bullet in bullets[1:]:
-                body.add_paragraph().text = bullet
-    return presentation
 
 
 class DynamicToolRegistry:
@@ -1314,7 +958,9 @@ class DynamicAgentFactory:
 
     def get_or_create(self, role: str, task_description: str, goal: str) -> dict:
         if role in self.agents:
-            return self.refresh_tools(role, task_description)
+            # return self.refresh_tools(role, task_description) # not need for now
+            return self.agents[role]
+
         return self.create_agent(role, task_description, goal)
 
     @traceable(name="auto_create_missing_tools", run_type="chain")
