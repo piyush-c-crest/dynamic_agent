@@ -29,11 +29,6 @@ from langsmith import traceable
 
 import document_pipeline as docpipe
 
-# Optional dependencies for the create_artifact tool. Each is only needed for
-# the artifact kinds that use it (docx for "doc", pptx for "slides",
-# weasyprint for "pdf") -- missing one doesn't break the other kinds, it
-# just makes that specific kind return a clear "pip install X" error instead
-# of failing to import at module load time.
 try:
     import markdown as _markdown
 except ImportError:
@@ -53,7 +48,6 @@ except ImportError:
 
 load_dotenv()
 
-# ---------- structured terminal + file logging ----------
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -233,21 +227,6 @@ llm = ChatOpenAI(
     model="openai.gpt-oss-120b"
 )
 
-# ---------- agent workdir & path confinement ----------
-# Everything the agent's read_file/write_file/list_directory/create_artifact
-# tools touch lives under a "workdir". This is a *separate* tree from the
-# app's own storage (DB/, tool_envs/, tools/, logs/), so a careless or
-# adversarial write from agent (or LLM-generated tool) code can't reach the
-# checkpoint db, sandbox venvs, or persisted tool source.
-#
-# DEFAULT_AGENT_WORKDIR is the fallback used when a thread hasn't picked a
-# folder of its own. Cowork-style "select a working directory" support lets
-# each thread point its tools at a *different* folder on disk instead --
-# see DynamicAgentManager.set_working_directory() below. The active workdir
-# for whichever thread is currently running is tracked in `_workdir_ctx`
-# (same contextvar pattern as `_token_usage_ctx`), so every tool call made
-# during that run resolves paths against the right folder without needing
-# the thread_id threaded through every function signature.
 DEFAULT_AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", os.path.join(os.getcwd(), "agent_workspace"))).resolve()
 DEFAULT_AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
 
@@ -271,11 +250,6 @@ def current_artifacts_dir() -> Path:
     return d
 
 
-# Internal app directories the agent must never read/write/list, even if a
-# workdir is ever misconfigured to overlap the project root. Resolved
-# lazily (not at import time) so they reflect wherever the process actually
-# ends up creating them (relative to cwd, same as the DB/tool_envs/logs
-# creation calls elsewhere in this file).
 _AGENT_DATA_DIR_NAMES = ("DB", "tool_envs", "tools", "logs")
 
 
@@ -423,9 +397,6 @@ def _format_conversation_history(history: list[dict], max_turns: int = MAX_HISTO
     return "\n".join(lines)
 
 
-# Generic runner that gets executed with the shared venv's interpreter, in a
-# clean subprocess, for every dynamically generated tool call. Kept
-# dependency-free (stdlib only) so it works before any pip install happens.
 _SANDBOX_RUNNER_SOURCE = '''
 import sys, json, importlib.util
 
@@ -482,7 +453,6 @@ class ToolSandboxExecutor:
         self._installed: set[str] = set()
         self._load_installed_cache()
 
-    # ---------- paths ----------
     def _venv_python(self) -> str:
         rel = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
         return os.path.join(self._venv_dir, *rel)
@@ -502,7 +472,6 @@ class ToolSandboxExecutor:
         with open(self._installed_cache_path, "w", encoding="utf-8") as f:
             json.dump(sorted(self._installed), f)
 
-    # ---------- setup (called once per tool, at creation time) ----------
     def ensure_env(self, tool_name: str, requirements: list[str] | None = None):
         """Create the shared venv on first use, then install only the packages not already present."""
         if not os.path.exists(self._venv_dir):
@@ -533,7 +502,6 @@ class ToolSandboxExecutor:
             f.write(code)
         return path
 
-    # ---------- execution (called on every tool invocation) ----------
     def run(self, tool_name: str, func_name: str, kwargs: dict) -> Any:
         module_path = self._module_path(tool_name)
         try:
@@ -558,7 +526,6 @@ class ToolSandboxExecutor:
         return payload["result"]
 
 
-# ---------- artifact content converters (used by create_artifact tool) ----------
 _ARTIFACT_KINDS = {"doc", "pdf", "slides", "image"}
 
 _INLINE_MD_RE = re.compile(
@@ -680,7 +647,6 @@ class DynamicToolRegistry:
     def _register_default_tools(self):
         """Register built-in tools"""
         self.register_tool("search", self._search_tool())
-        self.register_tool("calculator", self._calculator_tool())
         self.register_tool("stock_price", self._stock_price_tool())
         self.register_tool("read_document", self._read_document_tool())
         self.register_tool("list_documents", self._list_documents_tool())
@@ -772,21 +738,6 @@ class DynamicToolRegistry:
             result = search_tool.run(query)
             return result
         return search
-
-    @staticmethod
-    def _calculator_tool() -> BaseTool:
-        @tool
-        def calculator(first_num: float, second_num: float, operation: str) -> dict:
-            """Perform arithmetic: add, sub, mul, div"""
-            ops = {
-                "add": lambda a, b: a + b,
-                "sub": lambda a, b: a - b,
-                "mul": lambda a, b: a * b,
-                "div": lambda a, b: a / b if b != 0 else "Error: Division by zero"
-            }
-            result = ops.get(operation, lambda a, b: "Error: Unknown operation")(first_num, second_num)
-            return {"result": result, "operation": operation}
-        return calculator
 
     @staticmethod
     def _stock_price_tool() -> BaseTool:
@@ -1361,10 +1312,10 @@ class DynamicAgentFactory:
         self.tool_registry = tool_registry
         self.agents: dict[str, dict] = {}
 
-    def get_or_create(self, role: str, task_description: str) -> dict:
+    def get_or_create(self, role: str, task_description: str, goal: str) -> dict:
         if role in self.agents:
             return self.refresh_tools(role, task_description)
-        return self.create_agent(role, task_description)
+        return self.create_agent(role, task_description, goal)
 
     @traceable(name="auto_create_missing_tools", run_type="chain")
     def _create_missing_tools(self, specs: list[dict]) -> list[str]:
@@ -1465,11 +1416,12 @@ Rules:
         )
 
     @traceable(name="create_agent", run_type="chain")
-    def create_agent(self, role: str, task_description: str) -> dict:
-        _log("AGENT", "Creating specialized agent", role=role, task=task_description)
+    def create_agent(self, role: str, task_description: str, goal: str) -> dict:
+        _log("AGENT", "Creating specialized agent", role=role, task=task_description, goal = goal)
         available_tools = self.tool_registry.list_tools()
 
         selection_prompt = f"""
+The overall goal is "{goal}"
 You are configuring a specialized AI agent for the role "{role}".
 It will handle tasks like: "{task_description}"
 
@@ -1574,7 +1526,6 @@ class DynamicAgentManager:
         on disk. Threads that never call set_working_directory keep using
         DEFAULT_AGENT_WORKDIR."""
 
-    # ---------- working directory (cowork) ----------
     def set_working_directory(self, thread_id: str, path: str) -> dict:
         """Point a thread's file tools at an existing folder on disk.
 
@@ -1603,7 +1554,6 @@ class DynamicAgentManager:
     def clear_working_directory(self, thread_id: str) -> None:
         self._thread_workdirs.pop(thread_id, None)
 
-    # ---------- dynamic configuration ----------
     def set_behavior_style(self, style: str):
         self.behavior_style = style or "standard"
 
@@ -1617,7 +1567,6 @@ class DynamicAgentManager:
         except Exception:
             pass
 
-    # ---------- graph nodes ----------
     def _planner_node(self, state: OrchestratorState):
         _log("WORKFLOW", "Node started", node="planner")
         triggering_content = state["messages"][-1].content
@@ -1636,6 +1585,7 @@ class DynamicAgentManager:
         extra_note = f"\nAdditional instruction: {self.extra_instruction}" if self.extra_instruction else ""
 
         planning_prompt = f"""
+You are A Dynamic Agent Called : Crest
 You are a task planning system for a multi-agent orchestrator.
 Break the goal below into a short sequence of atomic, actionable tasks.
 For each task, assign an "agent_role": a short label for the kind of
@@ -1693,7 +1643,8 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
         role = task["agent_role"]
-        agent = self.agent_factory.get_or_create(role, task["description"])
+        goal = state['goal']
+        agent = self.agent_factory.get_or_create(role, task["description"], goal)
 
         task_messages = state.get("task_messages") or []
         if not task_messages:
@@ -1905,7 +1856,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             "conversation_history": [{"role": "assistant", "content": final.content}],
         }
 
-    # ---------- routing ----------
     @staticmethod
     def _route_after_planner(state: OrchestratorState):
         route = "assembler" if state["current_task_idx"] >= len(state["task_plan"]) else "agent_executor"
@@ -1938,7 +1888,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         _log("WORKFLOW", "Routing decision", from_node="evaluator", to_node=route)
         return route
 
-    # ---------- graph build ----------
     def _build_graph(self):
         graph = StateGraph(OrchestratorState)
 
@@ -1971,7 +1920,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
 
         return graph.compile(checkpointer=checkpointer)
 
-    # ---------- context sharing helper ----------
     @staticmethod
     def _build_context(task_results: dict, task: dict) -> str:
         """Pass only prior task results into a new task's prompt, keeping context small."""
@@ -1980,7 +1928,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         lines = [f"- {tid}: {str(res)}" for tid, res in task_results.items()]
         return "\n".join(lines)
 
-    # ---------- public API ----------
     def add_tool_from_prompt(self, prompt: str, tool_name: str):
         try:
             self.tool_registry.create_tool_from_prompt(prompt, tool_name)
@@ -2116,7 +2063,6 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         _log_block("FINAL-RESPONSE", f"Run completed for thread '{thread_id}'", final_ai_text, max_chars=10_000)
         return response
 
-    # ---------- token usage helpers ----------
     @staticmethod
     def _summarize_token_usage(records: list[dict]) -> dict:
         """Turn the raw list of per-LLM-call token records collected during one run() into a
