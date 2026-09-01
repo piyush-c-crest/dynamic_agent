@@ -874,6 +874,13 @@ class DynamicToolRegistry:
         you MAY use import statements for third-party packages — anything on
         PyPI is fine. Do NOT use os, subprocess, eval, or exec.
 
+        If the tool needs to read or write a file, use the builtin open()
+        (or pathlib.Path, without importing os) with a path RELATIVE to the
+        current directory -- e.g. open("notes.txt", "w"), not an absolute
+        path. Relative paths automatically resolve inside the user's active
+        agent working directory; do not try to construct or guess that
+        directory's absolute path yourself.
+
         Respond with ONLY a single JSON object, no prose, no markdown fences,
         in exactly this shape:
         {{
@@ -966,7 +973,8 @@ class DynamicToolRegistry:
                     object (requirements, function_name, docstring,
                     args_schema, code). The function may use import
                     statements for third-party packages, but not os,
-                    subprocess, eval, or exec.
+                    subprocess, eval, or exec. Any file I/O must use open()/
+                    pathlib with a path relative to the current directory.
                 """
                 _log_block("AI-REQUEST", f"Tool-repair prompt for '{tool_name}'", repair_prompt)
                 response = llm.invoke(
@@ -1017,7 +1025,14 @@ class DynamicToolRegistry:
         args_model = self._args_model(tool_name, args_schema)
 
         def _invoke(**kwargs):
-            return self.sandbox.run(tool_name, function_name, kwargs)
+            # Generated tool code is barred from `import os`/`subprocess` (see
+            # the codegen prompt), so its only way to touch disk is plain
+            # `open()`/pathlib with relative paths -- those resolve against
+            # whatever the subprocess's cwd is. sandbox.run() sets that cwd
+            # to the active agent working directory, so relative paths land
+            # inside it -- same confinement read_file/write_file/
+            # run_shell_command already get.
+            return self.sandbox.run(tool_name, function_name, kwargs, cwd=str(current_workdir()))
 
         return StructuredTool.from_function(
             func=_invoke,

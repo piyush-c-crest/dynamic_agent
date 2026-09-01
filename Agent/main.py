@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
@@ -258,19 +258,42 @@ def list_documents():
 
 
 @app.get("/generated-docs")
-def list_generated_documents():
-    """List all files in the generated_documents folder."""
+def list_generated_documents(thread_id: str):
+    """List files in the given thread's generated_documents folder.
+
+    Generated docs now live at <working directory>/generated_documents/
+    (see document_pipeline._generated_docs_dir), not one shared folder --
+    each thread can have a different working directory, so thread_id is
+    required to know which folder to list."""
+    docs_dir = Path(agent_manager.get_working_directory(thread_id)) / "generated_documents"
     files = []
-    if os.path.isdir(docpipe.GENERATED_DOCS_DIR):
-        for fname in sorted(os.listdir(docpipe.GENERATED_DOCS_DIR), reverse=True):
-            fpath = os.path.join(docpipe.GENERATED_DOCS_DIR, fname)
-            if os.path.isfile(fpath):
+    if docs_dir.is_dir():
+        for fname in sorted(os.listdir(docs_dir), reverse=True):
+            fpath = docs_dir / fname
+            if fpath.is_file():
                 files.append({
                     "filename": fname,
-                    "size_bytes": os.path.getsize(fpath),
-                    "download_url": f"/generated-docs/{fname}",
+                    "size_bytes": fpath.stat().st_size,
+                    "download_url": f"/generated-docs/{thread_id}/{fname}",
                 })
     return {"files": files}
+
+
+@app.get("/generated-docs/{thread_id}/{filename}")
+def download_generated_document(thread_id: str, filename: str):
+    """Serve one generated file from the given thread's working directory.
+
+    Replaces the old fixed StaticFiles mount below, which assumed a single
+    global generated_documents folder -- that assumption broke once each
+    thread could point at a different working directory, so which folder
+    to serve from now depends on thread_id."""
+    if not filename or "/" in filename or "\\" in filename or filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    docs_dir = (Path(agent_manager.get_working_directory(thread_id)) / "generated_documents").resolve()
+    fpath = (docs_dir / filename).resolve()
+    if not (fpath == docs_dir or fpath.is_relative_to(docs_dir)) or not fpath.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(fpath, filename=filename)
 
 
 @app.post("/chat")
@@ -375,7 +398,10 @@ def chat_stream(goal: str, thread_id: str | None = None, doc_id: str | None = No
     )
 
 
-# Serve generated documents as downloadable static files
-app.mount("/generated-docs", StaticFiles(directory=docpipe.GENERATED_DOCS_DIR), name="generated_docs")
+# Generated documents are now served per-thread by
+# GET /generated-docs/{thread_id}/{filename} above -- a single fixed
+# StaticFiles(directory=...) mount can't work anymore since each thread's
+# generated_documents folder lives inside its own (possibly different)
+# working directory rather than one shared location.
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

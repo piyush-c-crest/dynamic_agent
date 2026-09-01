@@ -9,12 +9,17 @@ Supported: PDF, DOCX, TXT, CSV, XLSX.
 This module provides:
   - Extraction: turn an uploaded binary file into plain text.
   - Storage: in-memory document store (keyed by doc_id).
-  - Generation: create PDF / DOCX / TXT files from content and save them to disk.
+  - Generation: create PDF / DOCX / TXT files from content and save them to
+    disk, inside the currently active agent working directory (see
+    _generated_docs_dir / path_utils.current_workdir).
 """
 import io
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
+
+from path_utils import current_workdir
 
 MAX_CHARS_FOR_CONTEXT = 12000  # MVP: whole-document context, no chunking/retrieval yet
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB cap on a single image attachment
@@ -23,8 +28,16 @@ TEXT_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | IMAGE_EXTENSIONS
 
-GENERATED_DOCS_DIR = os.path.join(os.path.dirname(__file__), "generated_documents")
-os.makedirs(GENERATED_DOCS_DIR, exist_ok=True)
+
+def _generated_docs_dir() -> Path:
+    """Where generate_pdf/generate_docx/generate_txt save their output --
+    inside whichever working directory is active for the current run (the
+    user's selected cowork folder, or DEFAULT_AGENT_WORKDIR if none was
+    selected), never a fixed folder next to this module. Same pattern as
+    path_utils.current_artifacts_dir()."""
+    d = current_workdir() / "generated_documents"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 _IMAGE_MIME_TYPES = {
     ".png": "image/png",
@@ -331,14 +344,19 @@ def generate_pdf(content: str, filename: str = "document") -> dict:
                 pdf.multi_cell(0, 7, line_sanitized)
 
         out_name = _unique_filename(filename, ".pdf")
-        out_path = os.path.join(GENERATED_DOCS_DIR, out_name)
+        out_path = str(_generated_docs_dir() / out_name)
         pdf.output(out_path)
 
         return {
             "status": "success",
             "filename": out_name,
             "filepath": out_path,
-            "download_url": f"/generated-docs/{out_name}",
+            # download_url intentionally omitted: serving it is now
+            # /generated-docs/{thread_id}/{filename} (see main.py), and this
+            # module operates below the thread/HTTP layer -- it has no
+            # thread_id to build that URL with. The caller (main.py's
+            # /generated-docs listing, or whoever has thread_id) builds it.
+            "download_url": None,
         }
     except Exception as e:
         return {"status": "error", "error": f"Failed to generate PDF: {e}"}
@@ -381,14 +399,17 @@ def generate_docx(content: str, filename: str = "document") -> dict:
                     run.font.size = Pt(11)
 
         out_name = _unique_filename(filename, ".docx")
-        out_path = os.path.join(GENERATED_DOCS_DIR, out_name)
+        out_path = str(_generated_docs_dir() / out_name)
         doc.save(out_path)
 
         return {
             "status": "success",
             "filename": out_name,
             "filepath": out_path,
-            "download_url": f"/generated-docs/{out_name}",
+            # See the matching comment in generate_pdf -- this module has no
+            # thread_id, so it can't build the /generated-docs/{thread_id}/...
+            # URL itself.
+            "download_url": None,
         }
     except Exception as e:
         return {"status": "error", "error": f"Failed to generate DOCX: {e}"}
@@ -401,7 +422,7 @@ def generate_txt(content: str, filename: str = "document") -> dict:
     """
     try:
         out_name = _unique_filename(filename, ".txt")
-        out_path = os.path.join(GENERATED_DOCS_DIR, out_name)
+        out_path = str(_generated_docs_dir() / out_name)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -409,7 +430,10 @@ def generate_txt(content: str, filename: str = "document") -> dict:
             "status": "success",
             "filename": out_name,
             "filepath": out_path,
-            "download_url": f"/generated-docs/{out_name}",
+            # See the matching comment in generate_pdf -- this module has no
+            # thread_id, so it can't build the /generated-docs/{thread_id}/...
+            # URL itself.
+            "download_url": None,
         }
     except Exception as e:
         return {"status": "error", "error": f"Failed to generate TXT: {e}"}

@@ -28,7 +28,16 @@ Public API
 ToolSandboxExecutor             -- manages the shared venv + per-call subprocess
   .ensure_env(tool, reqs)       -- create venv + install missing packages
   .save_tool_module(tool, code) -- persist generated source to tools folder
-  .run(tool, func, kwargs)      -- execute one tool call, return JSON result
+  .run(tool, func, kwargs, cwd) -- execute one tool call, return JSON result.
+                                    cwd (optional) is the directory the
+                                    generated code's own relative open()/
+                                    pathlib calls resolve against -- pass the
+                                    caller's active agent working directory
+                                    so a generated tool's file I/O stays
+                                    confined to it, same as the built-in
+                                    file tools. Runner/venv/module paths are
+                                    always resolved to absolute paths first
+                                    so changing cwd can't break locating them.
 """
 
 import os
@@ -171,14 +180,34 @@ class ToolSandboxExecutor:
     # Subprocess execution
     # ------------------------------------------------------------------
 
-    def run(self, tool_name: str, func_name: str, kwargs: dict) -> Any:
-        """Execute one tool call inside the shared venv subprocess and return its result."""
-        module_path = self._module_path(tool_name)
+    def run(self, tool_name: str, func_name: str, kwargs: dict, cwd: str | None = None) -> Any:
+        """Execute one tool call inside the shared venv subprocess and return its result.
+
+        cwd, if given, becomes the subprocess's working directory -- so a
+        generated tool's own relative open()/pathlib calls land inside it
+        (typically the caller's active agent working directory) instead of
+        wherever this process happens to be running from. venv_python,
+        the runner script, and the tool's module are always resolved to
+        absolute paths first, since once cwd changes, relative paths in the
+        command itself would otherwise be interpreted against the NEW cwd
+        and fail to locate the interpreter/runner/module at all.
+        """
+        module_path = os.path.abspath(self._module_path(tool_name))
+        venv_python = os.path.abspath(self._venv_python())
+        runner_path = os.path.abspath(self._runner_path)
+
+        run_cwd = None
+        if cwd:
+            run_cwd = os.path.abspath(cwd)
+            if not os.path.isdir(run_cwd):
+                raise RuntimeError(f"Tool '{tool_name}' cwd does not exist: {cwd!r}")
+
         try:
             proc = subprocess.run(
-                [self._venv_python(), self._runner_path, module_path, func_name],
+                [venv_python, runner_path, module_path, func_name],
                 input=json.dumps(kwargs),
                 capture_output=True, text=True, timeout=self.timeout_s,
+                cwd=run_cwd,
             )
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"Tool '{tool_name}' timed out after {self.timeout_s}s")
