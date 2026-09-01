@@ -1366,7 +1366,8 @@
             <div id="skills-error" style="display:none; color:var(--accent); font-size:13px; margin-top:8px;"></div>
           </div>
           <div class="modal-footer">
-            <span style="font-size:12px; color:var(--text-dim);">Registry only for now -- selection isn't wired into agents yet.</span>
+            <span style="font-size:12px; color:var(--text-dim);">Local/GitHub/community/project folders are indexed automatically.</span>
+            <button class="modal-btn-secondary" onclick="reindexSkills()">Reindex</button>
             <button class="modal-btn-primary" onclick="createSkill()">Register</button>
           </div>
         </div>
@@ -1579,6 +1580,25 @@
         loadSkills();
       } catch (e) {
         showSkillsError('Could not reach the server.');
+      }
+    }
+
+    async function reindexSkills() {
+      showSkillsError('');
+      const listEl = document.getElementById('skills-list');
+      listEl.innerHTML = '<div class="fp-empty">Reindexing…</div>';
+      try {
+        const res = await fetch(`${API_BASE}/skills/reindex`, { method: 'POST' });
+        if (!res.ok) {
+          showSkillsError('Reindex failed.');
+          loadSkills();
+          return;
+        }
+        const data = await res.json();
+        renderSkillsList(data.skills || []);
+      } catch (e) {
+        showSkillsError('Could not reach the server.');
+        loadSkills();
       }
     }
 

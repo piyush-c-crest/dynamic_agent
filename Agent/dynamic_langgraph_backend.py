@@ -24,6 +24,10 @@ multi-agent task execution.
                             Dynamic Skill Selection; registry only for now
                             -- folder discovery and LLM-driven selection
                             are later phases, see skills.py docstring)
+  skill_discovery.py      -- SkillDiscovery (Phase 2): auto-indexes
+                            skills/, github_skills/, community_skills/,
+                            project_skills/, and per-workdir .skills/
+                            SKILL.md files into the SkillRegistry
 
 Orchestration Graph
 -------------------
@@ -59,6 +63,7 @@ Public API (used by main.py / FastAPI routes)
   get_skills()                        -> JSON str  (Phase 1: registry contents)
   add_skill_dynamically(name, description, instructions, tool_names, triggers) -> bool
   remove_skill_dynamically(name)      -> bool
+  reindex_skills()                    -> dict  (Phase 2: re-scan skill folders)
 
 Configuration (see constants below)
 -------------------------------------
@@ -134,6 +139,10 @@ from artifact_builder import _md_to_docx, _build_pptx, _ARTIFACT_KINDS
 # Skill registry: Skill data model + SkillRegistry (Phase 1 of Dynamic
 # Skill Selection -- see skills.py's module docstring for the full plan)
 from skills import Skill, SkillRegistry
+
+# Skill discovery: auto-indexes skills/, github_skills/, community_skills/,
+# project_skills/, and per-workdir .skills/ into a SkillRegistry (Phase 2)
+from skill_discovery import SkillDiscovery, SKILL_ROOTS
 
 # Optional weasyprint + markdown for PDF artifact support
 try:
@@ -1174,9 +1183,16 @@ class DynamicAgentManager:
         self.skill_registry = SkillRegistry()
         """Phase 1 of Dynamic Skill Selection: registry only. Nothing reads
         from this yet -- DynamicAgentFactory.create_agent/refresh_tools
-        don't show skills to the LLM until Phase 3, and no folder is
-        auto-indexed into it until Phase 2. Skills currently only get in
-        here via add_skill()/the /skills management API, for testing."""
+        don't show skills to the LLM until Phase 3. Skills get in here via
+        add_skill()/the /skills management API (manual, for testing) and,
+        as of Phase 2, via automatic folder discovery below."""
+        self.skill_discovery = SkillDiscovery(self.skill_registry)
+        self.skill_discovery.index_all()
+        """Phase 2: scan skills/, github_skills/, community_skills/, and
+        project_skills/ once at startup. self.reindex_skills() re-runs
+        this on demand (e.g. after dropping in a new SKILL.md without
+        restarting); set_working_directory() below additionally indexes
+        <workdir>/.skills/ whenever a thread selects a cowork folder."""
         self.agent_factory = DynamicAgentFactory(self.tool_registry)
         self.behavior_style = "standard"
         self.extra_instruction = ""
@@ -1209,6 +1225,9 @@ class DynamicAgentManager:
             )
         self._thread_workdirs[thread_id] = resolved
         _log("FILESYSTEM", "Thread working directory selected", thread_id=thread_id, workdir=str(resolved))
+        skills_found = self.skill_discovery.index_workdir(resolved)
+        if skills_found:
+            _log("REGISTRY", "Indexed project skills from selected workdir", thread_id=thread_id, workdir=str(resolved), skills_found=skills_found)
         return {"status": "ok", "thread_id": thread_id, "workdir": str(resolved)}
 
     def get_working_directory(self, thread_id: str) -> str:
@@ -1648,6 +1667,13 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     def get_skill_info(self) -> str:
         return json.dumps(self.skill_registry.list_skills_full(), indent=2)
 
+    def reindex_skills(self) -> dict:
+        """Re-scan skills/, github_skills/, community_skills/, and
+        project_skills/ (Phase 2's fixed roots). Does not re-index any
+        thread's <workdir>/.skills/ -- that happens automatically on the
+        next set_working_directory() call for that thread."""
+        return self.skill_discovery.index_all()
+
     def get_artifacts(self) -> list[dict]:
         return self.tool_registry.list_artifacts()
 
@@ -1841,6 +1867,12 @@ def add_skill_dynamically(
 
 def remove_skill_dynamically(name: str) -> bool:
     return agent_manager.remove_skill(name)
+
+
+def reindex_skills() -> dict:
+    """Re-scan skills/, github_skills/, community_skills/, and
+    project_skills/ for SKILL.md files without restarting the process."""
+    return agent_manager.reindex_skills()
 
 
 def run_agent_with_requirements(user_input: str, thread_id: str, requirements: dict = None, doc_ids: list[str] = None,

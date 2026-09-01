@@ -38,12 +38,14 @@ from logging_utils import _log
 
 # Precedence used when two sources register a skill with the same name --
 # highest-precedence source wins and becomes the "active" skill for that
-# name. "workdir" (a project the user cowork'd into) and "project" (this
-# repo's own skills/ folder) are trusted first-party sources; "github" and
-# "community" are external and rank below them. "manual" (registered via
-# the management API, e.g. for testing) ranks lowest since it has no
-# on-disk source to be re-discovered from.
-_SOURCE_PRECEDENCE = ("workdir", "project", "github", "community", "manual")
+# name. "workdir" (a project the user cowork'd into) and "project"
+# (project_skills/, this deployment's own skills) are the most specific,
+# trusted-by-construction sources; "local" (skills/, this repo's general
+# first-party skills) ranks next; "github" and "community" are external
+# and untrusted by default (see skill_discovery.py); "manual" (registered
+# via the management API, e.g. for testing) ranks lowest since it has no
+# on-disk source Phase 2 discovery could ever re-derive it from.
+_SOURCE_PRECEDENCE = ("workdir", "project", "local", "github", "community", "manual")
 
 _DEFAULT_PERSIST_PATH = os.path.join("DB", "skills_index.json")
 
@@ -53,7 +55,7 @@ class Skill:
     name: str
     description: str
     instructions: str = ""
-    source: str = "manual"          # "manual" | "project" | "github" | "community" | "workdir"
+    source: str = "manual"          # "manual" | "local" | "project" | "github" | "community" | "workdir"
     path: str | None = None         # folder this skill was loaded from (set by Phase 2 discovery)
     tool_names: list[str] = field(default_factory=list)
     """Existing tool names (already in DynamicToolRegistry) this skill wants bound to an agent that selects it."""

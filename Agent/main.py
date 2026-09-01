@@ -106,6 +106,16 @@ def delete_skill(name: str):
     return {"status": "ok", "name": name}
 
 
+@app.post("/skills/reindex")
+def reindex_skills():
+    """Re-scan skills/, github_skills/, community_skills/, and
+    project_skills/ on disk for SKILL.md files without restarting the
+    process. Does not touch any thread's <workdir>/.skills/ -- that's
+    picked up automatically the next time a workdir is selected."""
+    results = agent_manager.reindex_skills()
+    return {"status": "ok", "results": results, "skills": json.loads(agent_manager.get_skill_info())}
+
+
 @app.get("/threads")
 def list_threads():
     """All threads that have at least one saved message, most recently updated first."""
