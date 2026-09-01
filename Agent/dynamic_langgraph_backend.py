@@ -74,6 +74,9 @@ Configuration (see constants below)
   MAX_TOOL_CALLS_PER_TASK   -- hard cap on consecutive tool calls per task
   MAX_READ_CHARS            -- read_file output cap (chars)
   MAX_LIST_ENTRIES          -- list_directory entry cap
+  SHELL_TIMEOUT              -- default run_shell_command timeout (seconds)
+  SHELL_TIMEOUT_CAP          -- hard ceiling on run_shell_command timeout (seconds)
+  MAX_SHELL_OUTPUT_CHARS     -- run_shell_command stdout/stderr cap (chars, each)
 """
 
 # ---------------------------------------------------------------------------
@@ -87,6 +90,7 @@ import uuid
 import operator
 import contextvars
 import sqlite3
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import TypedDict, Annotated, Any
@@ -125,6 +129,7 @@ from path_utils import (
     PathConfinementError,
     WorkdirSelectionError,
     _path_touches_agent_data,
+    _agent_data_roots,
     _APP_DATA_ERROR,
     DEFAULT_AGENT_WORKDIR,
     _workdir_ctx,
@@ -177,6 +182,9 @@ MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its
 MAX_TOOL_CALLS_PER_TASK = 10  # max consecutive tool calls per task to prevent infinite loops
 MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
 MAX_LIST_ENTRIES = 500
+SHELL_TIMEOUT = 60  # default seconds before run_shell_command kills the process
+SHELL_TIMEOUT_CAP = 300  # hard ceiling regardless of what the caller requests
+MAX_SHELL_OUTPUT_CHARS = 20_000  # cap for stdout/stderr each, same reasoning as MAX_READ_CHARS
 
 llm = ChatOpenAI(
     model="openai.gpt-oss-120b"
@@ -220,6 +228,25 @@ def parse_json_safely(text: str, default=None):
         return json.loads(cleaned.strip())
     except Exception:
         return default
+
+
+def _command_touches_agent_data(command: str) -> bool:
+    """String-scan safety net for run_shell_command: resolve_and_confine only
+    guards the tool's `cwd` argument, but a shell command can reference an
+    absolute (or home-relative) path to the app's own internal data
+    directories directly in its text -- e.g. `cat DB/dynamic_chatbot.db` or
+    `rm -rf ~/project/tools` -- without ever going through path confinement.
+    Mirrors the protection read_file/write_file/list_directory get for free
+    via resolve_and_confine + _path_touches_agent_data."""
+    markers = [str(root) for root in _agent_data_roots()]
+    home = Path.home()
+    for root in _agent_data_roots():
+        if root.is_relative_to(home):
+            rel = root.relative_to(home)
+            markers.append(f"~/{rel}")
+            markers.append(f"$HOME/{rel}")
+            markers.append(f'"$HOME"/{rel}')
+    return any(marker in command for marker in markers)
 
 _token_usage_ctx: contextvars.ContextVar[list | None] = contextvars.ContextVar(
     "token_usage_ctx", default=None
@@ -319,6 +346,7 @@ class DynamicToolRegistry:
         self.register_tool("write_file", self._write_file_tool())
         self.register_tool("list_directory", self._list_directory_tool())
         self.register_tool("view_image", self._view_image_tool())
+        self.register_tool("run_shell_command", self._shell_tool())
         self.register_tool("create_artifact", self._create_artifact_tool())
 
     def list_artifacts(self) -> list[dict]:
@@ -354,7 +382,8 @@ class DynamicToolRegistry:
     _DEFAULT_TOOL_NAMES = (
         "search", "calculator", "stock_price",
         "read_document", "list_documents", "generate_document",
-        "read_file", "write_file", "list_directory", "view_image", "create_artifact",
+        "read_file", "write_file", "list_directory", "view_image",
+        "run_shell_command", "create_artifact",
     )
 
     def remove_tool(self, name: str, delete_generated_code: bool = True) -> bool:
@@ -669,6 +698,68 @@ class DynamicToolRegistry:
                 "entries": [f"{'d' if e.is_dir() else 'f'} {e.name}" for e in entries],
             }
         return list_directory
+
+    @staticmethod
+    def _shell_tool() -> BaseTool:
+        @tool
+        def run_shell_command(command: str, cwd: str = "", timeout_seconds: int = 0) -> dict:
+            """Execute a shell command (via `bash -c`) in the current agent
+            workspace and return its exit code, stdout, and stderr. Use this
+            for anything read_file/write_file/list_directory can't do:
+            running tests, git, builds, package installs, greps, etc.
+
+            Parameters
+            ----------
+            command : str
+                The shell command to run.
+            cwd : str
+                Directory relative to the current working directory to run
+                the command in. Must not be absolute or contain '..'. Empty
+                string (default) runs in the workspace root.
+            timeout_seconds : int
+                Max seconds before the process is killed. 0 (default) uses
+                the standard timeout; any value is capped regardless.
+            """
+            if _command_touches_agent_data(command):
+                return {"error": _APP_DATA_ERROR}
+            try:
+                resolved_cwd = resolve_and_confine(cwd or None)
+            except PathConfinementError as e:
+                return {"error": str(e)}
+            if _path_touches_agent_data(resolved_cwd):
+                return {"error": _APP_DATA_ERROR}
+            if not resolved_cwd.is_dir():
+                return {"error": f"Not a directory: {cwd}"}
+
+            timeout = min(timeout_seconds or SHELL_TIMEOUT, SHELL_TIMEOUT_CAP)
+            try:
+                proc = subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=resolved_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return {"error": f"Command timed out after {timeout}s"}
+            except Exception as e:
+                return {"error": f"{type(e).__name__}: {e}"}
+
+            stdout, stderr = proc.stdout, proc.stderr
+            stdout_truncated = len(stdout) > MAX_SHELL_OUTPUT_CHARS
+            stderr_truncated = len(stderr) > MAX_SHELL_OUTPUT_CHARS
+            if stdout_truncated:
+                stdout = stdout[:MAX_SHELL_OUTPUT_CHARS]
+            if stderr_truncated:
+                stderr = stderr[:MAX_SHELL_OUTPUT_CHARS]
+
+            return {
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+            }
+        return run_shell_command
 
     def _create_artifact_tool(self) -> BaseTool:
         """Instance method (not static) so the handler can append to
