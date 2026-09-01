@@ -43,6 +43,14 @@ class WorkdirSelectRequest(BaseModel):
     path: str
 
 
+class SkillCreateRequest(BaseModel):
+    name: str
+    description: str
+    instructions: str = ""
+    tool_names: list[str] = []
+    triggers: list[str] = []
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -62,6 +70,40 @@ def list_tools():
 @app.get("/agents")
 def list_agents():
     return json.loads(agent_manager.get_agent_info())
+
+
+# ---------- skills (Phase 1: registry management -- no discovery or
+# LLM-driven selection yet, see dynamic_langgraph_backend.py / skills.py) ----------
+
+@app.get("/skills")
+def list_skills():
+    """All registered skills with full metadata (name, description,
+    instructions, source, tools, triggers, etc.)."""
+    return {"skills": json.loads(agent_manager.get_skill_info())}
+
+
+@app.post("/skills")
+def create_skill(req: SkillCreateRequest):
+    """Manually register a skill for testing. Registered with
+    source="manual", the lowest registration precedence -- Phase 2's
+    folder-based discovery (skills/, github_skills/, community_skills/,
+    per-workdir project skills) will be able to override a manual skill
+    of the same name."""
+    ok = agent_manager.add_skill(req.name, req.description, req.instructions, req.tool_names, req.triggers)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Skill '{req.name}' was not registered (a higher-precedence skill with this name already exists).",
+        )
+    return {"status": "ok", "name": req.name}
+
+
+@app.delete("/skills/{name}")
+def delete_skill(name: str):
+    removed = agent_manager.remove_skill(name)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    return {"status": "ok", "name": name}
 
 
 @app.get("/threads")

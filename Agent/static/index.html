@@ -1023,6 +1023,110 @@
       font-size: 13.5px;
     }
 
+    /* ---------- Skills panel ---------- */
+    .skill-item {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 8px;
+    }
+
+    .skill-item-main {
+      min-width: 0;
+    }
+
+    .skill-item-name-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .skill-item-name {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .skill-item-source {
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--text-dim);
+      background: var(--sidebar-bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px 6px;
+    }
+
+    .skill-item-desc {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-top: 3px;
+    }
+
+    .skill-item-tools {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      margin-top: 4px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    .skill-item-remove {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+    }
+
+    .skill-item-remove:hover {
+      background: var(--border);
+      color: var(--accent);
+    }
+
+    .skill-form {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .skill-form-label {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    .skill-form-input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--sidebar-bg);
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      resize: vertical;
+    }
+
+    .skill-form-input:focus {
+      border-color: var(--accent);
+    }
+
+    .skill-form-textarea {
+      min-height: 60px;
+    }
+
     .modal-btn-primary {
       padding: 10px 18px;
       border-radius: 8px;
@@ -1149,6 +1253,13 @@
           </svg>
           <span class="workdir-chip-path" id="workdir-chip-path"></span>
         </div>
+        <button class="icon-btn" id="skills-btn" onclick="openSkillsModal()" title="Skills">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+          </svg>
+        </button>
       </div>
 
       <!-- Local working-directory picker: a file-manager-style modal (address
@@ -1214,6 +1325,49 @@
             <button class="modal-btn-secondary" onclick="closeWorkdirModal()">Cancel</button>
             <button class="modal-btn-primary" id="workdir-use-btn" onclick="useThisFolder()" disabled>Use this
               folder</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skills panel (Phase 1: registry management only -- no folder
+           discovery or LLM-driven selection yet). Lists whatever's been
+           registered via POST /skills and lets you register/remove one
+           for testing. Later phases will populate this list from
+           skills/, github_skills/, community_skills/, and per-workdir
+           project skills automatically, and agents will pick from it
+           on their own -- this panel is deliberately manual for now. -->
+      <div class="modal-overlay" id="skills-modal-overlay" onclick="if (event.target === this) closeSkillsModal()">
+        <div class="modal" style="max-width:640px;">
+          <div class="modal-header">
+            <h3>Skills</h3>
+            <button class="icon-btn" onclick="closeSkillsModal()" title="Close">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div id="skills-list">
+              <div class="fp-empty">Loading…</div>
+            </div>
+            <div class="skill-form">
+              <div class="skill-form-label">Register a skill</div>
+              <input type="text" class="skill-form-input" id="skill-name-input" placeholder="Name (e.g. pdf_reports)">
+              <input type="text" class="skill-form-input" id="skill-desc-input"
+                placeholder="Description (shown to the agent when selecting skills)">
+              <textarea class="skill-form-input skill-form-textarea" id="skill-instructions-input"
+                placeholder="Instructions (playbook text spliced into the agent's system prompt when this skill is selected)"
+                rows="3"></textarea>
+              <input type="text" class="skill-form-input" id="skill-tools-input"
+                placeholder="Tool names, comma-separated (optional, e.g. read_file, write_file)">
+            </div>
+            <div id="skills-error" style="display:none; color:var(--accent); font-size:13px; margin-top:8px;"></div>
+          </div>
+          <div class="modal-footer">
+            <span style="font-size:12px; color:var(--text-dim);">Registry only for now -- selection isn't wired into agents yet.</span>
+            <button class="modal-btn-primary" onclick="createSkill()">Register</button>
           </div>
         </div>
       </div>
@@ -1318,6 +1472,114 @@
 
     function closeWorkdirModal() {
       document.getElementById('workdir-modal-overlay').classList.remove('active');
+    }
+
+    // ---------- skills panel (Phase 1: registry management only) ----------
+    function openSkillsModal() {
+      if (busy) return;
+      document.getElementById('skills-modal-overlay').classList.add('active');
+      showSkillsError('');
+      loadSkills();
+    }
+
+    function closeSkillsModal() {
+      document.getElementById('skills-modal-overlay').classList.remove('active');
+    }
+
+    function showSkillsError(msg) {
+      const el = document.getElementById('skills-error');
+      el.textContent = msg;
+      el.style.display = msg ? 'block' : 'none';
+    }
+
+    async function loadSkills() {
+      const listEl = document.getElementById('skills-list');
+      listEl.innerHTML = '<div class="fp-empty">Loading…</div>';
+      try {
+        const res = await fetch(`${API_BASE}/skills`);
+        const data = res.ok ? await res.json() : { skills: [] };
+        renderSkillsList(data.skills || []);
+      } catch (e) {
+        listEl.innerHTML = '<div class="fp-empty">Could not load skills.</div>';
+      }
+    }
+
+    function renderSkillsList(skillList) {
+      const listEl = document.getElementById('skills-list');
+      if (!skillList.length) {
+        listEl.innerHTML = '<div class="fp-empty">No skills registered yet.</div>';
+        return;
+      }
+      listEl.innerHTML = skillList.map(s => {
+        const tools = (s.tool_names || []).join(', ');
+        return `
+          <div class="skill-item">
+            <div class="skill-item-main">
+              <div class="skill-item-name-row">
+                <span class="skill-item-name">${escapeHtml(s.name)}</span>
+                <span class="skill-item-source">${escapeHtml(s.source || 'manual')}</span>
+              </div>
+              <div class="skill-item-desc">${escapeHtml(s.description || '')}</div>
+              ${tools ? `<div class="skill-item-tools">tools: ${escapeHtml(tools)}</div>` : ''}
+            </div>
+            <button class="skill-item-remove" title="Remove skill" onclick="deleteSkill('${s.name.replace(/'/g, "\\'")}')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                <path d="M10 11v6"></path>
+                <path d="M14 11v6"></path>
+              </svg>
+            </button>
+          </div>`;
+      }).join('');
+    }
+
+    async function createSkill() {
+      const name = document.getElementById('skill-name-input').value.trim();
+      const description = document.getElementById('skill-desc-input').value.trim();
+      const instructions = document.getElementById('skill-instructions-input').value.trim();
+      const toolsRaw = document.getElementById('skill-tools-input').value.trim();
+      const tool_names = toolsRaw ? toolsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+      if (!name || !description) {
+        showSkillsError('Name and description are required.');
+        return;
+      }
+      showSkillsError('');
+      try {
+        const res = await fetch(`${API_BASE}/skills`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description, instructions, tool_names, triggers: [] }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showSkillsError(err.detail || 'Could not register skill.');
+          return;
+        }
+        document.getElementById('skill-name-input').value = '';
+        document.getElementById('skill-desc-input').value = '';
+        document.getElementById('skill-instructions-input').value = '';
+        document.getElementById('skill-tools-input').value = '';
+        loadSkills();
+      } catch (e) {
+        showSkillsError('Could not reach the server.');
+      }
+    }
+
+    async function deleteSkill(name) {
+      try {
+        const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showSkillsError(err.detail || 'Could not remove skill.');
+          return;
+        }
+        loadSkills();
+      } catch (e) {
+        showSkillsError('Could not reach the server.');
+      }
     }
 
     function showWorkdirError(msg) {

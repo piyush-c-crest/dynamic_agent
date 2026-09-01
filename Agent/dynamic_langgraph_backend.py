@@ -20,6 +20,10 @@ multi-agent task execution.
                             cannot crash or hang the main process
   artifact_builder.py    -- format converters (_md_to_docx, _build_pptx,
                             _ARTIFACT_KINDS) for the create_artifact tool
+  skills.py               -- Skill data model + SkillRegistry (Phase 1 of
+                            Dynamic Skill Selection; registry only for now
+                            -- folder discovery and LLM-driven selection
+                            are later phases, see skills.py docstring)
 
 Orchestration Graph
 -------------------
@@ -52,6 +56,9 @@ Public API (used by main.py / FastAPI routes)
   get_agent_tools()                   -> JSON str
   get_agent_registry()                -> JSON str
   get_artifacts()                     -> list[dict]
+  get_skills()                        -> JSON str  (Phase 1: registry contents)
+  add_skill_dynamically(name, description, instructions, tool_names, triggers) -> bool
+  remove_skill_dynamically(name)      -> bool
 
 Configuration (see constants below)
 -------------------------------------
@@ -123,6 +130,10 @@ from sandbox import ToolSandboxExecutor
 
 # Document / presentation format converters
 from artifact_builder import _md_to_docx, _build_pptx, _ARTIFACT_KINDS
+
+# Skill registry: Skill data model + SkillRegistry (Phase 1 of Dynamic
+# Skill Selection -- see skills.py's module docstring for the full plan)
+from skills import Skill, SkillRegistry
 
 # Optional weasyprint + markdown for PDF artifact support
 try:
@@ -1160,6 +1171,12 @@ class DynamicAgentManager:
     """
     def __init__(self):
         self.tool_registry = DynamicToolRegistry()
+        self.skill_registry = SkillRegistry()
+        """Phase 1 of Dynamic Skill Selection: registry only. Nothing reads
+        from this yet -- DynamicAgentFactory.create_agent/refresh_tools
+        don't show skills to the LLM until Phase 3, and no folder is
+        auto-indexed into it until Phase 2. Skills currently only get in
+        here via add_skill()/the /skills management API, for testing."""
         self.agent_factory = DynamicAgentFactory(self.tool_registry)
         self.behavior_style = "standard"
         self.extra_instruction = ""
@@ -1606,6 +1623,31 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
     def get_agent_info(self) -> str:
         return json.dumps(self.agent_factory.list_agents(), indent=2)
 
+    def add_skill(
+        self, name: str, description: str, instructions: str = "",
+        tool_names: list[str] = None, triggers: list[str] = None,
+    ) -> bool:
+        """Manually register a skill (source="manual"). This is a Phase 1
+        testing/management path -- Phase 2 will add folder-based discovery
+        (skills/, github_skills/, community_skills/, per-workdir project
+        skills) that registers Skill objects the same way, just parsed
+        from SKILL.md instead of passed in directly."""
+        skill = Skill(
+            name=name,
+            description=description,
+            instructions=instructions,
+            source="manual",
+            tool_names=tool_names or [],
+            triggers=triggers or [],
+        )
+        return self.skill_registry.register_skill(skill)
+
+    def remove_skill(self, name: str) -> bool:
+        return self.skill_registry.remove_skill(name)
+
+    def get_skill_info(self) -> str:
+        return json.dumps(self.skill_registry.list_skills_full(), indent=2)
+
     def get_artifacts(self) -> list[dict]:
         return self.tool_registry.list_artifacts()
 
@@ -1784,6 +1826,21 @@ def add_tool_dynamically(tool_name: str, tool_prompt: str) -> bool:
 
 def remove_tool_dynamically(tool_name: str) -> bool:
     return agent_manager.remove_tool(tool_name)
+
+
+def get_skills() -> str:
+    return agent_manager.get_skill_info()
+
+
+def add_skill_dynamically(
+    name: str, description: str, instructions: str = "",
+    tool_names: list[str] = None, triggers: list[str] = None,
+) -> bool:
+    return agent_manager.add_skill(name, description, instructions, tool_names, triggers)
+
+
+def remove_skill_dynamically(name: str) -> bool:
+    return agent_manager.remove_skill(name)
 
 
 def run_agent_with_requirements(user_input: str, thread_id: str, requirements: dict = None, doc_ids: list[str] = None,
