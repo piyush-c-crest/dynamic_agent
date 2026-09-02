@@ -199,7 +199,7 @@ TOOL_CALL_LIMIT_OVERRIDES = {
 # agent DID something (moved/renamed/wrote/ran a command) rather than just
 # looked around or described a plan. Used by the evaluator to distinguish
 # a real result from a confident-sounding narrative.
-MUTATING_TOOL_NAMES = {"run_shell_command", "write_file", "generate_document"}
+MUTATING_TOOL_NAMES = {"run_shell_command", "write_file", "generate_document", "create_artifact"}
 MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
 MAX_LIST_ENTRIES = 500
 SHELL_TIMEOUT = 60  # default seconds before run_shell_command kills the process

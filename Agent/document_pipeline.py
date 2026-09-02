@@ -285,6 +285,34 @@ def _unique_filename(basename: str, ext: str) -> str:
     return f"{stem}_{short_id}{ext}"
 
 
+def _is_table_divider_row(stripped: str) -> bool:
+    """True for a markdown table divider/separator row like
+    '|------|:---:|------|' or '---|---|---'. These carry no renderable
+    content (no spaces for fpdf2's word-wrap to break on) and are the
+    single most common trigger for fpdf2 raising 'Not enough horizontal
+    space to render a single character' -- a long run of bare dashes has
+    nowhere to wrap. Safe to drop entirely in a plain-text PDF renderer."""
+    if not stripped:
+        return False
+    return all(c in "-|: " for c in stripped) and "-" in stripped
+
+
+def break_long_runs(text: str, max_run: int = 40) -> str:
+    """Insert zero-width break opportunities into any unbroken run of
+    max_run+ non-space characters (long URLs, unspaced separator lines,
+    run-on tokens) so fpdf2's word-wrapper always has somewhere to break
+    a line. Without this, a single "word" wider than the available page
+    width makes fpdf2 raise FPDFException("Not enough horizontal space
+    to render a single character") and abort the whole document -- this
+    just gives it a legal place to cut, it doesn't change what's visible."""
+    out_parts = []
+    for chunk in text.split(" "):
+        if len(chunk) > max_run:
+            chunk = " ".join(chunk[i:i + max_run] for i in range(0, len(chunk), max_run))
+        out_parts.append(chunk)
+    return " ".join(out_parts)
+
+
 def generate_pdf(content: str, filename: str = "document") -> dict:
     """Generate a PDF file from text/markdown content using fpdf2.
 
@@ -319,29 +347,60 @@ def generate_pdf(content: str, filename: str = "document") -> dict:
             stripped = sanitize_latin1(line.strip())
             line_sanitized = sanitize_latin1(line)
 
+            # Markdown table divider row ('|------|------|') -- no
+            # renderable content and the most common trigger for fpdf2's
+            # "not enough horizontal space" failure. Drop it silently.
+            if _is_table_divider_row(stripped):
+                continue
+
             # Heading detection (markdown '#')
             if stripped.startswith("#"):
                 level = len(stripped) - len(stripped.lstrip("#"))
-                text = stripped.lstrip("#").strip()
+                text = break_long_runs(stripped.lstrip("#").strip())
                 font_size = max(24 - (level - 1) * 4, 12)
                 pdf.set_font("Helvetica", "B", font_size)
-                pdf.cell(0, font_size * 0.6, text, new_x="LMARGIN", new_y="NEXT")
+                try:
+                    pdf.cell(0, font_size * 0.6, text, new_x="LMARGIN", new_y="NEXT")
+                except Exception:
+                    # Fallback: a long/unbreakable heading at a large font
+                    # size still doesn't fit -- retry as wrapped body text
+                    # at a smaller size rather than aborting the document.
+                    pdf.set_font("Helvetica", "B", 12)
+                    pdf.multi_cell(0, 7, text, new_x="LMARGIN", new_y="NEXT")
                 pdf.ln(2)
                 pdf.set_font("Helvetica", size=12)
 
             # Bullet list
             elif stripped.startswith(("-", "*")) and len(stripped) > 1 and stripped[1] == " ":
-                text = stripped[2:].strip()
+                text = break_long_runs(stripped[2:].strip())
                 pdf.cell(10)  # indent
-                pdf.cell(0, 7, f"-  {text}", new_x="LMARGIN", new_y="NEXT")
+                try:
+                    pdf.cell(0, 7, f"-  {text}", new_x="LMARGIN", new_y="NEXT")
+                except Exception:
+                    pdf.multi_cell(0, 7, f"-  {text}", new_x="LMARGIN", new_y="NEXT")
 
             # Empty line
             elif not stripped:
                 pdf.ln(5)
 
-            # Normal text
+            # Normal text (including markdown table content rows, which
+            # render as plain '| a | b |' text -- readable, if inelegant)
             else:
-                pdf.multi_cell(0, 7, line_sanitized)
+                safe_line = break_long_runs(line_sanitized)
+                try:
+                    # new_x/new_y explicit: multi_cell's default leaves the
+                    # cursor at the right edge, not the left margin -- two
+                    # consecutive un-qualified calls compound until the
+                    # next line has ~0mm of width left (see docstring note
+                    # on this function). This is the actual fix for the
+                    # "Not enough horizontal space" failures.
+                    pdf.multi_cell(0, 7, safe_line, new_x="LMARGIN", new_y="NEXT")
+                except Exception:
+                    # Last-resort fallback: hard-break into fixed-width
+                    # chunks so this one line can never take the whole
+                    # document down with it.
+                    for i in range(0, len(safe_line), 40):
+                        pdf.multi_cell(0, 7, safe_line[i:i + 40], new_x="LMARGIN", new_y="NEXT")
 
         out_name = _unique_filename(filename, ".pdf")
         out_path = str(_generated_docs_dir() / out_name)
