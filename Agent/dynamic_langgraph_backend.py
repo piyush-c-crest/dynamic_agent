@@ -91,6 +91,8 @@ import operator
 import contextvars
 import sqlite3
 import subprocess
+import shutil
+import functools
 from pathlib import Path
 from datetime import datetime
 from typing import TypedDict, Annotated, Any
@@ -179,7 +181,22 @@ MAX_RETRIES = 2
 MAX_TASKS = 6
 AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
 MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its smoke test
-MAX_TOOL_CALLS_PER_TASK = 10  # max consecutive tool calls per task to prevent infinite loops
+MAX_TOOL_CALLS_PER_TASK = 10  # default cap; see TOOL_CALL_LIMIT_OVERRIDES for role-specific budgets
+# Roles doing multi-step, multi-file work (moving/renaming a whole folder,
+# verifying the result) burn through the default 10-call budget on
+# exploration alone and get force-cut before they've done anything, which
+# then produces a text-only "final answer" describing work that never
+# happened. Give those roles a larger budget; everything else keeps the
+# tighter default (still a hard ceiling, still prevents infinite loops).
+TOOL_CALL_LIMIT_OVERRIDES = {
+    "executor": 25,
+    "verifier": 20,
+}
+# Tools whose successful invocation is actual, checkable evidence that the
+# agent DID something (moved/renamed/wrote/ran a command) rather than just
+# looked around or described a plan. Used by the evaluator to distinguish
+# a real result from a confident-sounding narrative.
+MUTATING_TOOL_NAMES = {"run_shell_command", "write_file", "generate_document"}
 MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
 MAX_LIST_ENTRIES = 500
 SHELL_TIMEOUT = 60  # default seconds before run_shell_command kills the process
@@ -228,6 +245,25 @@ def parse_json_safely(text: str, default=None):
         return json.loads(cleaned.strip())
     except Exception:
         return default
+
+
+def _tool_call_limit_for_role(role: str) -> int:
+    """Role-aware tool-call budget for a task. See TOOL_CALL_LIMIT_OVERRIDES."""
+    return TOOL_CALL_LIMIT_OVERRIDES.get(role, MAX_TOOL_CALLS_PER_TASK)
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_bash_path() -> str | None:
+    """Locate a real bash interpreter, if one exists on PATH.
+
+    On Linux/macOS this is essentially always found. On Windows it's only
+    found if the user has Git for Windows ("Git Bash") or WSL's bash.exe
+    on PATH -- a bare Windows install has neither, and hardcoding
+    ["bash", "-c", ...] there fails every single call with
+    FileNotFoundError ([WinError 2]). Cached because PATH doesn't change
+    mid-run and this otherwise gets called on every shell tool invocation.
+    """
+    return shutil.which("bash")
 
 
 def _command_touches_agent_data(command: str) -> bool:
@@ -703,10 +739,21 @@ class DynamicToolRegistry:
     def _shell_tool() -> BaseTool:
         @tool
         def run_shell_command(command: str, cwd: str = "", timeout_seconds: int = 0) -> dict:
-            """Execute a shell command (via `bash -c`) in the current agent
-            workspace and return its exit code, stdout, and stderr. Use this
-            for anything read_file/write_file/list_directory can't do:
-            running tests, git, builds, package installs, greps, etc.
+            """Execute a shell command in the current agent workspace and
+            return its exit code, stdout, and stderr. Use this for anything
+            read_file/write_file/list_directory can't do: running tests,
+            git, builds, package installs, greps, etc.
+
+            Runs via `bash -c` when a real bash is available (always true
+            on Linux/macOS; on Windows this means Git Bash or WSL's
+            bash.exe is on PATH), so POSIX shell syntax (pipes, &&, globs,
+            `ls`, `grep`, `sed`, etc.) works as expected. If no bash can be
+            found -- a bare Windows install with neither Git Bash nor WSL
+            -- commands run through the OS default shell instead (cmd.exe
+            on Windows). In that fallback mode, POSIX-only commands will
+            fail; prefer Windows-native equivalents (`dir` instead of
+            `ls`, `type` instead of `cat`, etc.) or ask the user to install
+            Git for Windows / WSL for full POSIX support.
 
             Parameters
             ----------
@@ -732,9 +779,24 @@ class DynamicToolRegistry:
                 return {"error": f"Not a directory: {cwd}"}
 
             timeout = min(timeout_seconds or SHELL_TIMEOUT, SHELL_TIMEOUT_CAP)
+
+            bash_path = _resolve_bash_path()
+            if bash_path:
+                popen_args: Any = [bash_path, "-c", command]
+                use_shell = False
+            else:
+                # No bash on PATH -- typically a bare Windows box with
+                # neither Git Bash nor WSL installed. Fall back to the OS
+                # default shell (cmd.exe on Windows) so the tool degrades
+                # gracefully instead of hard-failing every call with
+                # FileNotFoundError ([WinError 2]).
+                popen_args = command
+                use_shell = True
+
             try:
                 proc = subprocess.run(
-                    ["bash", "-c", command],
+                    popen_args,
+                    shell=use_shell,
                     cwd=resolved_cwd,
                     capture_output=True,
                     text=True,
@@ -742,6 +804,14 @@ class DynamicToolRegistry:
                 )
             except subprocess.TimeoutExpired:
                 return {"error": f"Command timed out after {timeout}s"}
+            except FileNotFoundError as e:
+                return {
+                    "error": (
+                        f"{type(e).__name__}: {e}. No usable shell interpreter "
+                        "found. On Windows, install Git for Windows (adds "
+                        "bash.exe to PATH) or WSL for POSIX-style commands."
+                    )
+                }
             except Exception as e:
                 return {"error": f"{type(e).__name__}: {e}"}
 
@@ -1460,11 +1530,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 HumanMessage(content=init_content),
             ]
 
+        tool_call_limit = _tool_call_limit_for_role(role)
         tool_results_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
-        if tool_results_count >= MAX_TOOL_CALLS_PER_TASK:
-            _log("WARNING", "Tool-call limit reached; requesting final answer", role=role, task_id=task["id"], tool_calls=tool_results_count, limit=MAX_TOOL_CALLS_PER_TASK)
+        forced_cutoff = tool_results_count >= tool_call_limit
+        if forced_cutoff:
+            _log("WARNING", "Tool-call limit reached; requesting final answer", role=role, task_id=task["id"], tool_calls=tool_results_count, limit=tool_call_limit)
             task_messages = task_messages + [
-                HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far.")
+                HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far. If you were not able to actually complete the requested action (e.g. files aren't all moved/renamed yet), say so plainly instead of describing it as done.")
             ]
 
         _log("WORKFLOW", "Executing task", role=role, task_id=task["id"], task=task["description"], tools=agent["tool_names"])
@@ -1536,9 +1608,9 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                     {"type": "image_url", "image_url": {"url": f"data:{result['mime_type']};base64,{result['data_b64']}"}}
                 )
                 summary = f"Loaded image '{result.get('path')}' ({result['mime_type']}); it is now attached for you to view."
-                tool_messages.append(ToolMessage(content=summary, tool_call_id=call["id"]))
+                tool_messages.append(ToolMessage(content=summary, tool_call_id=call["id"], name=tool_name))
             else:
-                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"], name=tool_name))
 
         updated_task_messages = state["task_messages"] + tool_messages
         extra_messages = list(tool_messages)
@@ -1557,6 +1629,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         _log("WORKFLOW", "Node started", node="evaluator")
         idx = state["current_task_idx"]
         task = state["task_plan"][idx]
+        role = task["agent_role"]
         task_messages = state["task_messages"]
         final_content = _as_text(task_messages[-1].content) if task_messages else ""
         if not final_content and task_messages:
@@ -1565,11 +1638,45 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                     final_content = _as_text(m.content)
                     break
 
+        # --- Ground truth: what did this attempt actually DO, not just say?
+        # A prose description of "files were moved" is not evidence that a
+        # move happened -- only an actual tool invocation is. Compute that
+        # from the trace itself so the evaluator (and the hard override
+        # below) aren't relying solely on the agent's own account.
+        tool_msgs = [m for m in task_messages if isinstance(m, ToolMessage)]
+        tools_invoked = [getattr(m, "name", None) or "?" for m in tool_msgs]
+        mutating_invoked = sorted({t for t in tools_invoked if t in MUTATING_TOOL_NAMES})
+        agent = self.agent_factory.get_or_create(role, task["description"], state["goal"])
+        mutating_available = sorted(set(agent["tool_names"]) & MUTATING_TOOL_NAMES)
+        forced_cutoff = len(tool_msgs) >= _tool_call_limit_for_role(role)
+
+        if tools_invoked:
+            evidence_line = (
+                f"Tools actually invoked this attempt: {', '.join(sorted(set(tools_invoked)))} "
+                f"(total calls: {len(tools_invoked)})."
+            )
+        else:
+            evidence_line = "Tools actually invoked this attempt: NONE -- the agent never called a single tool."
+        if forced_cutoff:
+            evidence_line += (
+                " NOTE: this attempt hit its tool-call budget and was forced to give a final answer "
+                "without further tool use -- treat any claim of newly-completed action with extra scrutiny."
+            )
+
         eval_prompt = f"""
 Task: {task['description']}
 Agent output: {final_content}
 
-Does this output satisfactorily complete the task? Respond with ONLY JSON:
+Ground truth from the execution trace (not the agent's own words):
+{evidence_line}
+
+Does this output satisfactorily complete the task? A confident description of
+work being done is NOT evidence that it happened -- only an actual tool
+invocation is. If the task requires taking or verifying an action
+(moving/renaming/writing files, running a command, checking real state) but
+the ground truth above shows no matching tool was actually invoked, that
+MUST be a RETRY regardless of how complete or detailed the text sounds.
+Respond with ONLY JSON:
 {{"status": "PASS" or "RETRY", "reason": "short reason", "feedback": "what to fix if RETRY"}}
 """
         _log_block("AI-REQUEST", f"Evaluator prompt for task {task['id']}", eval_prompt)
@@ -1577,17 +1684,49 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
             eval_prompt,
             config={
                 "run_name": f"evaluator:{task['id']}",
-                "tags": ["evaluator", task["agent_role"], task["id"]],
-                "metadata": {"task_id": task["id"], "role": task["agent_role"]},
+                "tags": ["evaluator", role, task["id"]],
+                "metadata": {"task_id": task["id"], "role": role},
             },
         )
-        _record_token_usage(f"evaluator:{task['id']}", eval_response, ["evaluator", task["agent_role"]])
+        _record_token_usage(f"evaluator:{task['id']}", eval_response, ["evaluator", role])
         _log_block("AI-REPLY", f"Raw evaluator reply for task {task['id']}", _as_text(eval_response.content))
         verdict = parse_json_safely(
             eval_response.content,
-            default={"status": "PASS", "reason": "auto-accepted (unparseable verdict)", "feedback": ""},
+            # Fail CLOSED, not open: an unparseable verdict used to
+            # auto-PASS, silently accepting whatever the agent said. Treat
+            # it as a RETRY instead so a parsing hiccup can't masquerade as
+            # a verified success.
+            default={
+                "status": "RETRY",
+                "reason": "auto-retry (unparseable evaluator verdict; failing closed rather than silently accepting)",
+                "feedback": "Re-attempt the task and make sure the final answer is backed by actual tool calls.",
+            },
         )
-        _log("WORKFLOW", "Task evaluation completed", task_id=task["id"], verdict=verdict)
+        _log("WORKFLOW", "Task evaluation completed", task_id=task["id"], verdict=verdict, tools_invoked=tools_invoked)
+
+        # Hard, code-level safety net: don't let an LLM verdict of PASS
+        # override a clear-cut absence of the actions the task actually
+        # required. This is exactly the pattern that fooled the evaluator
+        # before -- a fully-written "old path -> new path, moved" report
+        # backed by zero run_shell_command/write_file calls.
+        if verdict.get("status") == "PASS" and mutating_available and not mutating_invoked:
+            _log(
+                "WARNING",
+                "Evaluator PASS overridden: action tools were available but none were invoked",
+                task_id=task["id"], role=role, mutating_available=mutating_available,
+            )
+            verdict = {
+                "status": "RETRY",
+                "reason": (
+                    f"Overridden: {mutating_available} was available for this task but the attempt "
+                    "invoked none of it -- the output describes actions that were never actually executed."
+                ),
+                "feedback": (
+                    "Actually call the tool(s) needed to perform the requested action (e.g. "
+                    "run_shell_command to move/rename files, write_file to save output) instead of "
+                    "just describing the intended result."
+                ),
+            }
 
         retry_count = state.get("retry_count", 0)
         if verdict.get("status") == "RETRY" and retry_count < MAX_RETRIES:
@@ -1602,12 +1741,29 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
                 "last_verdict": verdict,
             }
 
-        # Result accepted: either PASS, or retries exhausted
-        _log("WORKFLOW", "Task accepted", task_id=task["id"], role=task["agent_role"])
+        # Result accepted: either a genuine PASS, or retries exhausted.
+        # These are no longer treated as equivalent -- a task that's still
+        # failing when the retry budget runs out gets flagged explicitly
+        # instead of being silently folded into the results as if it
+        # succeeded, so the assembler (and any later task that reads this
+        # one's context) can see and report the real state.
+        unverified = verdict.get("status") != "PASS"
         results = dict(state.get("task_results", {}))
-        results[task["id"]] = final_content
+        stored_content = final_content
+        if unverified:
+            _log(
+                "WARNING",
+                "Retries exhausted with task still unverified; closing with an explicit failure flag instead of a silent PASS",
+                task_id=task["id"], role=role, last_reason=verdict.get("reason", ""),
+            )
+            stored_content = (
+                f"[UNVERIFIED -- retry budget exhausted without confirmed evidence of completion. "
+                f"Last evaluator note: {verdict.get('reason', '')}]\n{final_content}"
+            )
+        _log("WORKFLOW", "Task accepted" if not unverified else "Task closed as unverified", task_id=task["id"], role=role)
+        results[task["id"]] = stored_content
         summary_msg = AIMessage(
-            content=f"[{task['agent_role']}] completed '{task['description']}':\n{final_content[:400]}"
+            content=f"[{role}] {'completed' if not unverified else 'ATTEMPTED (unverified)'} '{task['description']}':\n{stored_content[:400]}"
         )
         return {
             "task_results": results,
@@ -1626,7 +1782,12 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         summary_prompt = f"Original goal: {state['goal']}\n\nTask results:\n"
         for t in plan:
             summary_prompt += f"- {t['description']}: {results.get(t['id'], 'N/A')}\n"
-        summary_prompt += "\nWrite a single, coherent final answer to the original goal, using the results above."
+        summary_prompt += (
+            "\nWrite a single, coherent final answer to the original goal, using the results above. "
+            "Any result above marked [UNVERIFIED ...] was NOT confirmed to have actually happened -- "
+            "do not describe that part of the work as done. Instead say plainly what could not be "
+            "confirmed and why, so the user knows what still needs checking."
+        )
 
         _log_block("AI-REQUEST", "Prompt sent to LLM (assembler)", summary_prompt)
         final = llm.invoke(
@@ -1656,9 +1817,11 @@ Does this output satisfactorily complete the task? Respond with ONLY JSON:
         if not task_messages:
             route = "evaluator"
         else:
+            idx = state["current_task_idx"]
+            role = state["task_plan"][idx]["agent_role"]
             last = task_messages[-1]
             tool_call_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
-            if getattr(last, "tool_calls", None) and tool_call_count < MAX_TOOL_CALLS_PER_TASK:
+            if getattr(last, "tool_calls", None) and tool_call_count < _tool_call_limit_for_role(role):
                 route = "tools"
             else:
                 route = "evaluator"
