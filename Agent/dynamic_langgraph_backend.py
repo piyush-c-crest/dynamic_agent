@@ -387,6 +387,7 @@ class DynamicToolRegistry:
         self.register_tool("view_image", self._view_image_tool())
         self.register_tool("run_shell_command", self._shell_tool())
         self.register_tool("create_artifact", self._create_artifact_tool())
+        self.register_tool("update_tasks", self._update_tasks_tool())
 
     def list_artifacts(self) -> list[dict]:
         return list(self.artifacts)
@@ -422,7 +423,7 @@ class DynamicToolRegistry:
         "search", "calculator", "stock_price",
         "read_document", "list_documents", "generate_document",
         "read_file", "write_file", "list_directory", "view_image",
-        "run_shell_command", "create_artifact",
+        "run_shell_command", "create_artifact", "update_tasks",
     )
 
     def remove_tool(self, name: str, delete_generated_code: bool = True) -> bool:
@@ -934,6 +935,50 @@ class DynamicToolRegistry:
             return {"status": "created", **record}
         return create_artifact
 
+    @staticmethod
+    def _update_tasks_tool() -> BaseTool:
+        """Lets a task agent revise the NOT-YET-STARTED part of the plan
+        mid-task (insert a step it discovers is missing, drop one that
+        turned out to be unnecessary, edit an upcoming task's description).
+
+        The actual mutation happens in DynamicAgentManager._tools_node /
+        _apply_task_plan_update, which have the live task_plan and
+        current_task_idx from graph state -- a plain tool function can't
+        see or change those. This function body only exists so the tool
+        has a schema and description to bind to the agent's LLM; it is
+        intercepted by name before ever executing in the normal graph path.
+        """
+        @tool
+        def update_tasks(operations_json: str) -> dict:
+            """Revise the task plan for tasks that have NOT started yet.
+
+            Use this the moment you discover, mid-task, that the PLAN
+            itself needs to change: a step is missing, an upcoming task
+            turned out to be unnecessary, or a task's description needs to
+            be corrected. Do NOT use this to describe your own task's
+            sub-steps or to report progress -- only for changes to OTHER,
+            upcoming tasks. Use it sparingly; most tasks need it zero times.
+
+            Already-completed tasks and the task you are currently
+            executing can never be edited or removed through this tool.
+
+            Parameters
+            ----------
+            operations_json : str
+                A JSON array string of operations. Each operation is one of:
+                - {"op": "insert_after_current", "id": "T2b", "description": "...", "agent_role": "..."}
+                  Insert a new task immediately after the task you're on now.
+                - {"op": "insert_at_end", "id": "T9", "description": "...", "agent_role": "..."}
+                  Append a new task at the end of the plan.
+                - {"op": "update", "id": "T5", "description": "...", "agent_role": "..."}
+                  Edit an upcoming task. Only the fields you include change.
+                - {"op": "remove", "id": "T5"}
+                  Drop an upcoming task from the plan entirely.
+                Example: '[{"op": "insert_after_current", "id": "T2b", "description": "Validate the totals against the source data", "agent_role": "analyst"}]'
+            """
+            return {"status": "deferred", "note": "Applied by the orchestrator's tools node, not this function."}
+        return update_tasks
+
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
         """Create a new tool from a natural language prompt, run in an isolated venv + subprocess sandbox."""
@@ -1290,7 +1335,8 @@ Rules:
         applied_skill_names, skill_tool_names = self._apply_skills(result.get("skills", []) or [])
 
         desired_names = (
-            set(result.get("tools", []))
+            {"update_tasks"}  # every agent can revise the upcoming plan, regardless of role
+            | set(result.get("tools", []))
             | set(agent_conf["tool_names"])
             | set(created_tool_names)
             | set(skill_tool_names)
@@ -1383,7 +1429,10 @@ Rules:
 
         created_tool_names = self._create_missing_tools(config.get("new_tools", []))
         applied_skill_names, skill_tool_names = self._apply_skills(config.get("skills", []) or [])
-        all_tool_names = list(dict.fromkeys(config.get("tools", []) + created_tool_names + skill_tool_names))
+        all_tool_names = list(dict.fromkeys(
+            ["update_tasks"]  # every agent can revise the upcoming plan, regardless of role
+            + config.get("tools", []) + created_tool_names + skill_tool_names
+        ))
 
         selected_tools = [
             self.tool_registry.get_tool(name)
@@ -1647,20 +1696,122 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         # Mirrored into top-level `messages` so LangSmith's Messages panel shows this turn
         return {"task_messages": task_messages, "messages": [response]}
 
+    @staticmethod
+    def _apply_task_plan_update(plan: list[dict], current_idx: int, operations_json: str) -> tuple[dict, list[dict]]:
+        """Apply agent-requested edits to the NOT-YET-STARTED tail of the
+        task plan (everything after current_idx). Tasks already completed
+        (idx < current_idx, already have a task_results entry) and the task
+        currently executing (idx == current_idx) are immutable -- every
+        other node (_route_after_agent, _evaluator_node, _assembler_node)
+        assumes those stay stable once reached, so allowing edits to them
+        here would let a mid-task tool call rewrite history out from under
+        the rest of the graph.
+
+        Returns (result_dict_for_the_calling_agent, new_plan). new_plan is
+        always a fresh list (never mutates the input in place) so it's
+        safe to hand straight back as the new task_plan state value.
+        """
+        new_plan = [dict(t) for t in plan]
+        existing_ids = {t["id"] for t in new_plan}
+        applied: list[str] = []
+        errors: list[str] = []
+
+        operations = parse_json_safely(operations_json, default=None)
+        if operations is None or not isinstance(operations, list):
+            return (
+                {
+                    "status": "error",
+                    "errors": [f"operations_json must be a JSON array string; got: {operations_json!r}"],
+                    "current_task_list": new_plan,
+                },
+                new_plan,
+            )
+
+        for op in operations:
+            op = op if isinstance(op, dict) else {}
+            kind = op.get("op")
+            task_id = op.get("id")
+
+            if kind in ("insert_after_current", "insert_at_end"):
+                description = (op.get("description") or "").strip()
+                agent_role = (op.get("agent_role") or "").strip()
+                if not task_id or not description or not agent_role:
+                    errors.append(f"insert skipped: 'id', 'description' and 'agent_role' are all required ({op})")
+                elif task_id in existing_ids:
+                    errors.append(f"insert skipped: id '{task_id}' already exists")
+                else:
+                    insert_at = (current_idx + 1) if kind == "insert_after_current" else len(new_plan)
+                    insert_at = max(insert_at, current_idx + 1)  # never insert before/at a completed or in-flight task
+                    new_plan.insert(insert_at, {"id": task_id, "description": description, "agent_role": agent_role})
+                    existing_ids.add(task_id)
+                    applied.append(f"inserted '{task_id}'")
+
+            elif kind in ("remove", "update"):
+                pos = next((i for i, t in enumerate(new_plan) if t["id"] == task_id), None)
+                if pos is None:
+                    errors.append(f"{kind} skipped: id '{task_id}' not found")
+                elif pos <= current_idx:
+                    errors.append(f"{kind} skipped: '{task_id}' is already completed or in progress and cannot be changed")
+                elif kind == "remove":
+                    new_plan.pop(pos)
+                    existing_ids.discard(task_id)
+                    applied.append(f"removed '{task_id}'")
+                else:
+                    if op.get("description"):
+                        new_plan[pos]["description"] = op["description"]
+                    if op.get("agent_role"):
+                        new_plan[pos]["agent_role"] = op["agent_role"]
+                    applied.append(f"updated '{task_id}'")
+
+            else:
+                errors.append(f"unknown op {kind!r} ignored (must be insert_after_current, insert_at_end, update, or remove)")
+
+        if len(new_plan) > MAX_TASKS:
+            overflow = len(new_plan) - MAX_TASKS
+            new_plan = new_plan[:MAX_TASKS]
+            errors.append(f"plan capped at {MAX_TASKS} tasks; {overflow} trailing pending task(s) dropped")
+
+        result = {
+            "status": "ok" if applied and not errors else ("partial" if applied else "no_changes"),
+            "applied": applied,
+            "errors": errors,
+            "current_task_list": new_plan,
+        }
+        return result, new_plan
+
     def _tools_node(self, state: OrchestratorState):
         """Custom tool executor operating on task_messages."""
         _log("WORKFLOW", "Node started", node="tools")
         idx = state["current_task_idx"]
-        task = state["task_plan"][idx] if idx < len(state["task_plan"]) else {"id": "?", "agent_role": "?"}
+        plan = state["task_plan"]
+        task = plan[idx] if idx < len(plan) else {"id": "?", "agent_role": "?"}
         last = state["task_messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
         _log("WORKFLOW", "Executing tool calls", task_id=task["id"], call_count=len(tool_calls))
         tool_messages = []
         pending_images: list[dict] = []
+        updated_plan = None  # only set if an update_tasks call actually changed the plan this turn
         for call in tool_calls:
             tool_name = call["name"]
             tool_args = call.get("args", {})
             _log("TOOL-CALL", "Invoking tool", tool=tool_name, task_id=task["id"], arguments=tool_args)
+
+            if tool_name == "update_tasks":
+                # Special-cased rather than dispatched through the generic
+                # registry path below: mutating task_plan/current_task_idx
+                # requires the live graph state, which a plain BaseTool
+                # function has no access to (see _update_tasks_tool's
+                # docstring). Chain off updated_plan so multiple
+                # update_tasks calls in the same turn compose correctly.
+                result, updated_plan = self._apply_task_plan_update(
+                    updated_plan if updated_plan is not None else plan,
+                    idx,
+                    tool_args.get("operations_json", "[]"),
+                )
+                _log_block("TOOL-RESULT", "✓ update_tasks result", str(result))
+                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"], name=tool_name))
+                continue
+
             tool_obj = self.tool_registry.get_tool(tool_name)
             try:
                 if tool_obj is None:
@@ -1705,7 +1856,11 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
 
         # Mirrored into `messages` too, same reason as agent_executor_node above
         _log("WORKFLOW", "Tool execution complete; returning to task agent", task_id=task["id"], image_results=len(pending_images))
-        return {"task_messages": updated_task_messages, "messages": extra_messages}
+        output = {"task_messages": updated_task_messages, "messages": extra_messages}
+        if updated_plan is not None:
+            _log("WORKFLOW", "Task plan revised via update_tasks", task_id=task["id"], new_task_count=len(updated_plan))
+            output["task_plan"] = updated_plan
+        return output
 
     def _evaluator_node(self, state: OrchestratorState):
         _log("WORKFLOW", "Node started", node="evaluator")

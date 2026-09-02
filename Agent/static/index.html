@@ -507,6 +507,40 @@
       font-weight: bold;
     }
 
+    .plan-checklist + .steps-log:not(:empty) {
+      margin-top: 4px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+
+    .step-marker {
+      flex-shrink: 0;
+      width: 14px;
+      margin-top: 2px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .step-marker.done {
+      color: var(--accent);
+    }
+
+    .step-marker.current {
+      color: var(--accent);
+      animation: pulse-marker 1.4s ease-in-out infinite;
+    }
+
+    .step-marker.unverified {
+      color: #d97757;
+      font-weight: bold;
+    }
+
+    @keyframes pulse-marker {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
     .typing-dots {
       display: flex;
       gap: 5px;
@@ -2062,7 +2096,10 @@
           <svg viewBox="0 0 24 24"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>
           <span class="steps-summary">Working</span>
         </div>
-        <div class="steps-body"></div>
+        <div class="steps-body">
+          <div class="plan-checklist"></div>
+          <div class="steps-log"></div>
+        </div>
       </div>
       <div class="msg-content"><div class="typing-dots"><span></span><span></span><span></span></div></div>
     </div>`;
@@ -2080,6 +2117,29 @@
     function renderMarkdown(el, text) {
       const dirty = marked.parse(text || '');
       el.innerHTML = DOMPurify.sanitize(dirty);
+    }
+
+    function markerFor(state) {
+      if (state === 'done') return '<span class="step-marker done">✓</span>';
+      if (state === 'unverified') return '<span class="step-marker unverified">!</span>';
+      if (state === 'current') return '<span class="step-marker current">●</span>';
+      return '<span class="step-marker pending">○</span>';
+    }
+
+    // Redraws the checklist from scratch every time it's called (initial
+    // plan, a mid-run update_tasks revision, or a task_complete landing).
+    // taskStates carries pass/unverified outcomes across a revision, since
+    // a revised plan doesn't itself say which earlier tasks passed vs. were
+    // closed unverified -- only current_task_idx (done vs. not-yet-reached).
+    function renderPlanChecklist(container, plan, idx, taskStates) {
+      container.innerHTML = plan.map((t, i) => {
+        const state = taskStates[t.id] || (i < idx ? 'done' : (i === idx ? 'current' : 'pending'));
+        return `<div class="step-row" data-task-id="${escapeHtml(String(t.id))}">
+          ${markerFor(state)}
+          <span class="step-role">${escapeHtml(t.agent_role || '')}</span>
+          <span>${escapeHtml(t.description || '')}</span>
+        </div>`;
+      }).join('');
     }
 
     function sendFrom(fromLanding) {
@@ -2105,8 +2165,24 @@
       const msgDiv = addAssistantMessage();
       const stepsBlock = msgDiv.querySelector('.steps-block');
       const stepsBody = msgDiv.querySelector('.steps-body');
+      const planChecklist = msgDiv.querySelector('.plan-checklist');
+      const stepsLog = msgDiv.querySelector('.steps-log');
       const stepsSummary = msgDiv.querySelector('.steps-summary');
       const contentEl = msgDiv.querySelector('.msg-content');
+
+      // Local to this run: the plan/progress/outcomes the checklist is
+      // redrawn from every time a plan/task_complete event lands.
+      let planTasks = [];
+      let planIdx = 0;
+      const taskStates = {}; // task_id -> 'done' | 'unverified'
+
+      function logRow(className, text) {
+        const row = document.createElement('div');
+        row.className = 'step-status' + (className ? ' ' + className : '');
+        row.textContent = text;
+        stepsLog.appendChild(row);
+        scrollToBottom();
+      }
 
       let url = `${API_BASE}/chat/stream?goal=${encodeURIComponent(goal)}`;
       if (threadId) url += `&thread_id=${encodeURIComponent(threadId)}`;
@@ -2144,33 +2220,44 @@
       });
 
       es.addEventListener('plan', (e) => {
-        const plan = JSON.parse(e.data).task_plan || [];
+        const data = JSON.parse(e.data);
+        planTasks = data.task_plan || [];
+        planIdx = data.current_task_idx || 0;
         stepsBlock.style.display = 'block';
-        stepsSummary.textContent = `Plan — ${plan.length} task${plan.length === 1 ? '' : 's'}`;
-        stepsBody.innerHTML = plan.map(t =>
-          `<div class="step-row"><span class="step-role">${escapeHtml(t.agent_role)}</span><span>${escapeHtml(t.description)}</span></div>`
-        ).join('');
+        const done = Object.values(taskStates).filter(s => s === 'done' || s === 'unverified').length;
+        stepsSummary.textContent = data.revised
+          ? `Plan updated — ${done}/${planTasks.length} task${planTasks.length === 1 ? '' : 's'} done`
+          : `Plan — ${planTasks.length} task${planTasks.length === 1 ? '' : 's'}`;
+        renderPlanChecklist(planChecklist, planTasks, planIdx, taskStates);
+        if (data.revised) logRow('', 'Plan revised mid-run.');
         scrollToBottom();
       });
 
       es.addEventListener('status', (e) => {
-        const msg = JSON.parse(e.data).message;
-        const row = document.createElement('div');
-        row.className = 'step-status';
-        row.textContent = msg;
-        stepsBody.appendChild(row);
-        scrollToBottom();
+        const data = JSON.parse(e.data);
+        logRow('', data.message);
+      });
+
+      es.addEventListener('task_complete', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.task_id) taskStates[data.task_id] = data.status === 'passed' ? 'done' : 'unverified';
+        planIdx = data.index + 1;
+        renderPlanChecklist(planChecklist, planTasks, planIdx, taskStates);
+        const done = Object.values(taskStates).filter(s => s === 'done' || s === 'unverified').length;
+        stepsSummary.textContent = `Plan — ${done}/${planTasks.length} task${planTasks.length === 1 ? '' : 's'} done`;
+        logRow(
+          data.status === 'passed' ? 'pass' : 'retry',
+          data.status === 'passed'
+            ? `Task ${data.index + 1}/${data.total} completed — ${data.reason || 'looks good'}`
+            : `Task ${data.index + 1}/${data.total} closed unverified — ${data.reason || ''}`
+        );
       });
 
       es.addEventListener('evaluation', (e) => {
         const v = JSON.parse(e.data);
-        const row = document.createElement('div');
-        row.className = 'step-status ' + (v.status === 'RETRY' ? 'retry' : 'pass');
-        row.textContent = v.status === 'RETRY'
+        logRow(v.status === 'RETRY' ? 'retry' : 'pass', v.status === 'RETRY'
           ? `Retry requested — ${v.reason || ''}`
-          : `Task evaluated — ${v.reason || 'looks good'}`;
-        stepsBody.appendChild(row);
-        scrollToBottom();
+          : `Task evaluated — ${v.reason || 'looks good'}`);
       });
 
       es.addEventListener('final_answer', (e) => {

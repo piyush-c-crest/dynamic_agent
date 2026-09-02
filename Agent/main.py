@@ -314,6 +314,22 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _task_info(plan: list[dict], idx: int) -> dict:
+    """Snapshot of one task_plan entry for SSE payloads, tolerant of an
+    out-of-range idx (e.g. right after the last task completes, before
+    the assembler's 'done' event lands)."""
+    if 0 <= idx < len(plan):
+        t = plan[idx]
+        return {
+            "task_id": t.get("id"),
+            "description": t.get("description"),
+            "agent_role": t.get("agent_role"),
+            "index": idx,
+            "total": len(plan),
+        }
+    return {"task_id": None, "description": None, "agent_role": None, "index": idx, "total": len(plan)}
+
+
 def _stream_events(goal: str, thread_id: str, doc_id: str | None = None, workdir: str | None = None):
     # A folder picked before this thread existed rides along on the first
     # message (see index.html's `pendingWorkdir`) -- apply it up front so
@@ -338,6 +354,13 @@ def _stream_events(goal: str, thread_id: str, doc_id: str | None = None, workdir
     yield _sse("thread", {"thread_id": thread_id, "workdir": agent_manager.get_working_directory(thread_id)})
 
     final_answer = ""
+    # Tracks the plan/progress as the graph reports it, so agent_executor/
+    # tools events (which don't carry task_plan themselves) can still be
+    # tagged with which task they belong to. Updated from planner (initial
+    # plan), tools (mid-run update_tasks revisions), and evaluator (index
+    # advancing past a completed task).
+    current_plan: list[dict] = []
+    current_idx = 0
     # Each item Starlette pulls from this generator runs via a separate
     # threadpool call with its own COPY of the request's contextvars.Context
     # (see anyio.to_thread.run_sync / Starlette's iterate_in_threadpool), so
@@ -364,17 +387,54 @@ def _stream_events(goal: str, thread_id: str, doc_id: str | None = None, workdir
             for node_name, node_output in update.items():
 
                 if node_name == "planner":
-                    yield _sse("plan", {"task_plan": node_output.get("task_plan", [])})
+                    current_plan = node_output.get("task_plan", [])
+                    current_idx = node_output.get("current_task_idx", 0)
+                    yield _sse("plan", {"task_plan": current_plan, "current_task_idx": current_idx, "revised": False})
 
                 elif node_name == "agent_executor":
-                    yield _sse("status", {"message": "agent working on current task"})
+                    info = _task_info(current_plan, current_idx)
+                    yield _sse("status", {
+                        "phase": "thinking",
+                        "message": f"[{info['agent_role']}] working on task {info['index'] + 1}/{info['total']}"
+                                   if info["task_id"] else "agent working on current task",
+                        **info,
+                    })
 
                 elif node_name == "tools":
-                    yield _sse("status", {"message": "executing tool call(s)"})
+                    info = _task_info(current_plan, current_idx)
+                    yield _sse("status", {
+                        "phase": "tool_call",
+                        "message": f"[{info['agent_role']}] running tool(s) for task {info['index'] + 1}/{info['total']}"
+                                   if info["task_id"] else "executing tool call(s)",
+                        **info,
+                    })
+                    # update_tasks may have revised the plan this turn -- see
+                    # DynamicAgentManager._tools_node / _apply_task_plan_update
+                    # in dynamic_langgraph_backend.py. Only present when the
+                    # plan actually changed, so this doesn't fire every turn.
+                    if "task_plan" in node_output:
+                        current_plan = node_output["task_plan"]
+                        yield _sse("plan", {"task_plan": current_plan, "current_task_idx": current_idx, "revised": True})
 
                 elif node_name == "evaluator":
-                    verdict = node_output.get("last_verdict", {})
-                    yield _sse("evaluation", verdict)
+                    verdict = node_output.get("last_verdict", {}) or {}
+                    if "task_results" in node_output:
+                        # Completion branch: either a genuine PASS or the
+                        # retry budget ran out (see _evaluator_node's
+                        # "unverified" handling) -- current_task_idx has
+                        # already advanced past the task this verdict is for.
+                        finished_idx = node_output.get("current_task_idx", current_idx + 1) - 1
+                        info = _task_info(current_plan, finished_idx)
+                        current_idx = node_output.get("current_task_idx", current_idx + 1)
+                        yield _sse("task_complete", {
+                            **info,
+                            "status": "passed" if verdict.get("status") == "PASS" else "unverified",
+                            "reason": verdict.get("reason", ""),
+                        })
+                    else:
+                        # Retry branch: same task, another attempt coming.
+                        info = _task_info(current_plan, current_idx)
+                        yield _sse("evaluation", {**info, **verdict})
 
                 elif node_name == "assembler":
                     msgs = node_output.get("messages", [])
