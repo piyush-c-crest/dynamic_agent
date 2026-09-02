@@ -341,6 +341,16 @@ class OrchestratorState(TypedDict):
     task_results: dict
     task_messages: list[BaseMessage]
     retry_count: int
+    tool_calls_baseline: int
+    """Count of ToolMessages already present in task_messages as of the
+    start of the CURRENT retry attempt. The tool-call budget
+    (MAX_TOOL_CALLS_PER_TASK / TOOL_CALL_LIMIT_OVERRIDES) is meant to cap
+    tool use PER ATTEMPT, not cumulatively across an entire task's retry
+    history -- task_messages is never cleared between retries (the
+    evaluator's feedback needs the prior context), so without this
+    baseline every retry inherits the previous attempt's exhausted
+    tool-call count and is forced to a final answer with zero tool calls
+    of its own. See _agent_executor_node / _evaluator_node."""
     last_verdict: dict
     conversation_history: Annotated[list[dict], operator.add]
     attachments: list[dict]
@@ -1618,6 +1628,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             "task_results": {},
             "task_messages": [],
             "retry_count": 0,
+            "tool_calls_baseline": 0,
             "last_verdict": {},
             "conversation_history": [{"role": "user", "content": goal}],
             "attachments": attachments,
@@ -1662,7 +1673,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             ]
 
         tool_call_limit = _tool_call_limit_for_role(role)
-        tool_results_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+        tool_calls_baseline = state.get("tool_calls_baseline", 0)
+        tool_results_count_total = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+        # Budget is per-attempt: subtract whatever tool calls already
+        # existed at the start of this retry (see tool_calls_baseline
+        # docstring on OrchestratorState) so a fresh retry actually gets
+        # its own tool-call budget instead of inheriting an exhausted one.
+        tool_results_count = tool_results_count_total - tool_calls_baseline
         forced_cutoff = tool_results_count >= tool_call_limit
         if forced_cutoff:
             _log("WARNING", "Tool-call limit reached; requesting final answer", role=role, task_id=task["id"], tool_calls=tool_results_count, limit=tool_call_limit)
@@ -1880,7 +1897,14 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         # move happened -- only an actual tool invocation is. Compute that
         # from the trace itself so the evaluator (and the hard override
         # below) aren't relying solely on the agent's own account.
-        tool_msgs = [m for m in task_messages if isinstance(m, ToolMessage)]
+        tool_msgs_all = [m for m in task_messages if isinstance(m, ToolMessage)]
+        # Same per-attempt scoping as _agent_executor_node: only tool calls
+        # made SINCE the current attempt began count toward this attempt's
+        # evidence/budget. Calls from a prior, already-graded attempt
+        # shouldn't be re-presented as "what this attempt did", and
+        # shouldn't make a fresh retry look pre-exhausted.
+        tool_calls_baseline = state.get("tool_calls_baseline", 0)
+        tool_msgs = tool_msgs_all[tool_calls_baseline:]
         tools_invoked = [getattr(m, "name", None) or "?" for m in tool_msgs]
         mutating_invoked = sorted({t for t in tools_invoked if t in MUTATING_TOOL_NAMES})
         agent = self.agent_factory.get_or_create(role, task["description"], state["goal"])
@@ -1975,6 +1999,11 @@ Respond with ONLY JSON:
                 "task_messages": state["task_messages"] + [feedback_msg],
                 "messages": [feedback_msg],
                 "retry_count": retry_count + 1,
+                # Everything counted as a ToolMessage up to this point
+                # belongs to the attempt that just got graded -- move the
+                # baseline up so the retry starts its tool-call budget at
+                # zero instead of inheriting the exhausted count.
+                "tool_calls_baseline": len(tool_msgs_all),
                 "last_verdict": verdict,
             }
 
@@ -2007,6 +2036,7 @@ Respond with ONLY JSON:
             "current_task_idx": idx + 1,
             "task_messages": [],
             "retry_count": 0,
+            "tool_calls_baseline": 0,
             "last_verdict": verdict,
             "messages": [summary_msg],
         }
@@ -2057,7 +2087,8 @@ Respond with ONLY JSON:
             idx = state["current_task_idx"]
             role = state["task_plan"][idx]["agent_role"]
             last = task_messages[-1]
-            tool_call_count = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+            tool_call_count_total = sum(1 for m in task_messages if isinstance(m, ToolMessage))
+            tool_call_count = tool_call_count_total - state.get("tool_calls_baseline", 0)
             if getattr(last, "tool_calls", None) and tool_call_count < _tool_call_limit_for_role(role):
                 route = "tools"
             else:
