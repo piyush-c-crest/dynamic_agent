@@ -20,14 +20,17 @@ multi-agent task execution.
                             cannot crash or hang the main process
   artifact_builder.py    -- format converters (_md_to_docx, _build_pptx,
                             _ARTIFACT_KINDS) for the create_artifact tool
-  skills.py               -- Skill data model + SkillRegistry (Phase 1 of
-                            Dynamic Skill Selection; registry only for now
-                            -- folder discovery and LLM-driven selection
-                            are later phases, see skills.py docstring)
+  skills.py               -- Skill data model + SkillRegistry (Phase 1)
   skill_discovery.py      -- SkillDiscovery (Phase 2): auto-indexes
                             skills/, github_skills/, community_skills/,
                             project_skills/, and per-workdir .skills/
                             SKILL.md files into the SkillRegistry
+  (Phase 3 lives in this file: DynamicAgentFactory.create_agent/
+  refresh_tools show the skill registry to the LLM alongside tools and
+  splice a selected skill's instructions into the agent's system prompt
+  via skill_directive(). Bundled tools from untrusted skill sources are
+  intentionally NOT auto-created yet -- see _apply_skills' docstring;
+  that trust-boundary gate is Phase 4.)
 
 Orchestration Graph
 -------------------
@@ -1148,8 +1151,9 @@ class DynamicToolRegistry:
 
 class DynamicAgentFactory:
     """Creates and caches specialized sub-agents (system_prompt, tools, llm) at runtime."""
-    def __init__(self, tool_registry: DynamicToolRegistry):
+    def __init__(self, tool_registry: DynamicToolRegistry, skill_registry: SkillRegistry):
         self.tool_registry = tool_registry
+        self.skill_registry = skill_registry
         self.agents: dict[str, dict] = {}
 
     def get_or_create(self, role: str, task_description: str, goal: str) -> dict:
@@ -1179,22 +1183,77 @@ class DynamicAgentFactory:
                 _log("ERROR", "Auto-creation of missing capability failed", tool=name, error=str(e))
         return created
 
+    @traceable(name="apply_selected_skills", run_type="chain")
+    def _apply_skills(self, skill_names: list[str]) -> tuple[list[str], list[str]]:
+        """Resolve LLM-selected skill names into (applied_skill_names,
+        extra_tool_names) -- the skills that actually exist in the
+        registry, plus the tool names they bring with them (their own
+        `tool_names`, and any `bundled_tool_specs` for TRUSTED skills only).
+
+        Bundled tools from an untrusted skill (source="github"/"community"
+        without an explicit `trust: trusted` override) are deliberately
+        NOT auto-created here -- routing untrusted, skill-authored tool
+        code through the sandbox without a review step is exactly the
+        trust-boundary gap Phase 4 exists to close. For now they're
+        skipped with a warning; the skill's `instructions` still apply,
+        just without its bundled tools.
+        """
+        applied_skills: list[str] = []
+        extra_tool_names: list[str] = []
+        for name in skill_names:
+            skill = self.skill_registry.get_skill(name)
+            if skill is None:
+                _log("WARNING", "Selected skill not found in registry; skipping", skill=name)
+                continue
+            applied_skills.append(name)
+            extra_tool_names.extend(skill.tool_names)
+            if skill.bundled_tool_specs:
+                if skill.trust != "trusted":
+                    _log(
+                        "WARNING", "Skipping bundled tools from untrusted skill (trust boundary handling lands in Phase 4)",
+                        skill=name, source=skill.source, bundled_tools=[t.get("name") for t in skill.bundled_tool_specs],
+                    )
+                else:
+                    extra_tool_names.extend(self._create_missing_tools(skill.bundled_tool_specs))
+        return applied_skills, extra_tool_names
+
+    def skill_directive(self, skill_names: list[str]) -> str:
+        """Splice each selected skill's instructions into the agent's
+        effective system prompt, appended after tool_directive. Rebuilt
+        fresh every task the same way tool_directive is, so a skill added
+        later via refresh_tools takes effect without recreating the agent."""
+        if not skill_names:
+            return ""
+        parts = []
+        for name in skill_names:
+            skill = self.skill_registry.get_skill(name)
+            if skill is None or not skill.instructions:
+                continue
+            parts.append(f"--- SKILL: {skill.name} ---\n{skill.instructions}")
+        if not parts:
+            return ""
+        return "\n\n" + "\n\n".join(parts)
+
     @traceable(name="refresh_agent_tools", run_type="chain")
     def refresh_tools(self, role: str, task_description: str) -> dict:
         """Re-check an existing agent's tool set against the current registry and task. Only expands tools, never removes."""
         agent_conf = self.agents[role]
         available_tools = self.tool_registry.list_tools()
+        available_skills = self.skill_registry.list_skills()
 
         selection_prompt = f"""
 The "{role}" agent currently has these tools: {agent_conf['tool_names']}
+It currently has these skills applied: {agent_conf.get('skill_names', [])}
 It now needs to handle this task: "{task_description}"
 
 Available tools (name: description): {json.dumps(available_tools)}
+Available skills (name: description): {json.dumps(available_skills)}
 
 Return ONLY JSON in this exact shape:
 {{
   "tools": ["tool_name1", "tool_name2"],
-  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}]
+  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}],
+  "skills": ["skill_name1"]
 }}
 
 Rules:
@@ -1205,9 +1264,13 @@ Rules:
   do something this task clearly requires (e.g. reading email, sending a
   message, converting a file format, calling a specific API). Leave it as
   an empty list if the available tools are sufficient.
+- "skills": its current skills plus any additional skill (from Available
+  skills) this new task clearly needs. This is usually empty -- only add
+  a skill if its playbook is a genuine match for the new task, not just
+  loosely related.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
-        _log("AI-REQUEST", "Refreshing agent tool selection", role=role, current_tools=agent_conf["tool_names"])
+        _log("AI-REQUEST", "Refreshing agent tool selection", role=role, current_tools=agent_conf["tool_names"], current_skills=agent_conf.get("skill_names", []))
         response = llm.invoke(
             selection_prompt,
             config={
@@ -1224,13 +1287,17 @@ Rules:
             return agent_conf
 
         created_tool_names = self._create_missing_tools(result.get("new_tools", []))
+        applied_skill_names, skill_tool_names = self._apply_skills(result.get("skills", []) or [])
 
         desired_names = (
             set(result.get("tools", []))
             | set(agent_conf["tool_names"])
             | set(created_tool_names)
+            | set(skill_tool_names)
         )
-        if desired_names == set(agent_conf["tool_names"]):
+        desired_skill_names = set(agent_conf.get("skill_names", [])) | set(applied_skill_names)
+
+        if desired_names == set(agent_conf["tool_names"]) and desired_skill_names == set(agent_conf.get("skill_names", [])):
             return agent_conf
 
         selected_tools = [
@@ -1240,7 +1307,8 @@ Rules:
         ]
         agent_conf["llm"] = llm.bind_tools(selected_tools) if selected_tools else llm
         agent_conf["tool_names"] = [t.name for t in selected_tools]
-        _log("AGENT", "Agent tool set refreshed", role=role, tools=agent_conf["tool_names"])
+        agent_conf["skill_names"] = sorted(desired_skill_names)
+        _log("AGENT", "Agent tool set refreshed", role=role, tools=agent_conf["tool_names"], skills=agent_conf["skill_names"])
         return agent_conf
 
     def tool_directive(self, tool_names: list[str]) -> str:
@@ -1261,6 +1329,7 @@ Rules:
     def create_agent(self, role: str, task_description: str, goal: str) -> dict:
         _log("AGENT", "Creating specialized agent", role=role, task=task_description, goal = goal)
         available_tools = self.tool_registry.list_tools()
+        available_skills = self.skill_registry.list_skills()
 
         selection_prompt = f"""
 The overall goal is "{goal}"
@@ -1268,12 +1337,14 @@ You are configuring a specialized AI agent for the role "{role}".
 It will handle tasks like: "{task_description}"
 
 Available tools (name: description): {json.dumps(available_tools)}
+Available skills (name: description): {json.dumps(available_skills)}
 
 Return ONLY JSON in this exact shape:
 {{
   "system_prompt": "a system prompt defining this agent's persona, scope and behavior",
   "tools": ["tool_name1", "tool_name2"],
-  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}]
+  "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}],
+  "skills": ["skill_name1"]
 }}
 
 Rules:
@@ -1283,6 +1354,10 @@ Rules:
   do something this role clearly needs (e.g. reading email, sending a
   message, converting a file format, calling a specific external API).
   Leave it as an empty list if the available tools are sufficient.
+- "skills": only names that already appear in the Available skills list
+  above. A skill is a playbook of instructions, not just a tool -- select
+  one ONLY if its description is a clear match for this role's work.
+  Usually 0-1 skills, at most 2. It is fine, and common, to select zero.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
         _log("AI-REQUEST", "Selecting tools and instructions for new agent", role=role)
@@ -1303,10 +1378,12 @@ Rules:
                 "system_prompt": f"You are a focused, helpful '{role}' agent. Be concise and accurate.",
                 "tools": [],
                 "new_tools": [],
+                "skills": [],
             }
 
         created_tool_names = self._create_missing_tools(config.get("new_tools", []))
-        all_tool_names = list(dict.fromkeys(config.get("tools", []) + created_tool_names))
+        applied_skill_names, skill_tool_names = self._apply_skills(config.get("skills", []) or [])
+        all_tool_names = list(dict.fromkeys(config.get("tools", []) + created_tool_names + skill_tool_names))
 
         selected_tools = [
             self.tool_registry.get_tool(name)
@@ -1320,15 +1397,16 @@ Rules:
             "role": role,
             "system_prompt": config.get("system_prompt", f"You are a helpful '{role}' agent."),
             "tool_names": [t.name for t in selected_tools],
+            "skill_names": applied_skill_names,
             "llm": agent_llm,
         }
         self.agents[role] = agent_conf
-        _log("AGENT", "Specialized agent ready", role=role, tools=agent_conf["tool_names"])
+        _log("AGENT", "Specialized agent ready", role=role, tools=agent_conf["tool_names"], skills=agent_conf["skill_names"])
         return agent_conf
 
     def list_agents(self) -> dict:
         return {
-            role: {"system_prompt": conf["system_prompt"], "tools": conf["tool_names"]}
+            role: {"system_prompt": conf["system_prompt"], "tools": conf["tool_names"], "skills": conf.get("skill_names", [])}
             for role, conf in self.agents.items()
         }
 
@@ -1369,7 +1447,7 @@ class DynamicAgentManager:
         this on demand (e.g. after dropping in a new SKILL.md without
         restarting); set_working_directory() below additionally indexes
         <workdir>/.skills/ whenever a thread selects a cowork folder."""
-        self.agent_factory = DynamicAgentFactory(self.tool_registry)
+        self.agent_factory = DynamicAgentFactory(self.tool_registry, self.skill_registry)
         self.behavior_style = "standard"
         self.extra_instruction = ""
         self.temperature = 0.0
@@ -1515,8 +1593,12 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             if context:
                 init_prompt += f"\n\nRelevant context from earlier tasks:\n{context}"
 
-            # Regenerate the tool directive fresh so it reflects the agent's current tools
-            full_system_prompt = agent["system_prompt"] + self.agent_factory.tool_directive(agent["tool_names"])
+            # Regenerate the tool/skill directives fresh so they reflect the agent's current tools/skills
+            full_system_prompt = (
+                agent["system_prompt"]
+                + self.agent_factory.tool_directive(agent["tool_names"])
+                + self.agent_factory.skill_directive(agent.get("skill_names", []))
+            )
             attachments = state.get("attachments") or []
             if attachments:
                 # Multimodal content: text block plus whatever images came in
@@ -1539,7 +1621,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 HumanMessage(content="You have reached the maximum number of tool calls for this task. Do NOT invoke any more tools. Provide your final answer immediately based on the data retrieved so far. If you were not able to actually complete the requested action (e.g. files aren't all moved/renamed yet), say so plainly instead of describing it as done.")
             ]
 
-        _log("WORKFLOW", "Executing task", role=role, task_id=task["id"], task=task["description"], tools=agent["tool_names"])
+        _log("WORKFLOW", "Executing task", role=role, task_id=task["id"], task=task["description"], tools=agent["tool_names"], skills=agent.get("skill_names", []))
         _log("AI-REQUEST", "Invoking task agent", role=role, task_id=task["id"], message_count=len(task_messages))
         response = agent["llm"].invoke(
             task_messages,
