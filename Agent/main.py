@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import ast
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -114,6 +115,23 @@ def reindex_skills():
     picked up automatically the next time a workdir is selected."""
     results = agent_manager.reindex_skills()
     return {"status": "ok", "results": results, "skills": json.loads(agent_manager.get_skill_info())}
+
+
+@app.get("/skills/acquisition-state")
+def skill_acquisition_state():
+    """v2: a debugging/testing window into SkillAcquisitionManager's
+    in-memory positive/negative cache and currently-held locks -- not part
+    of the acquisition pipeline itself, just a way to confirm from outside
+    the log file that a cache hit actually short-circuited (no repeat
+    search/install), or that a negative-cache TTL is still in effect."""
+    mgr = agent_manager.skill_acquisition
+    return {
+        "positive_cache": dict(mgr._positive_cache),
+        "negative_cache_age_seconds": {
+            key: round(__import__("time").time() - ts, 1) for key, ts in mgr._negative_cache.items()
+        },
+        "locks_held": [key for key, lock in mgr._install_locks.items() if lock.locked()],
+    }
 
 
 @app.get("/threads")
@@ -415,6 +433,21 @@ def _stream_events(goal: str, thread_id: str, doc_id: str | None = None, workdir
                     if "task_plan" in node_output:
                         current_plan = node_output["task_plan"]
                         yield _sse("plan", {"task_plan": current_plan, "current_task_idx": current_idx, "revised": True})
+
+                    # v2 live skill acquisition (dynamic_langgraph_backend.py's
+                    # _tools_node special-case for "request_skill_acquisition",
+                    # skill_acquisition.py's SkillAcquisitionManager): surface it
+                    # as its own SSE event, not just buried in the generic
+                    # "tool_call" status above, so the UI (or a test script) can
+                    # show "searching for a skill... installed 'x'" live instead
+                    # of only finding out from the log file after the fact.
+                    for msg in node_output.get("messages", []):
+                        if getattr(msg, "type", "") == "tool" and getattr(msg, "name", "") == "request_skill_acquisition":
+                            try:
+                                payload = ast.literal_eval(msg.content) if isinstance(msg.content, str) else msg.content
+                            except (ValueError, SyntaxError):
+                                payload = {"note": str(msg.content)}
+                            yield _sse("skill_acquisition", {**_task_info(current_plan, current_idx), **(payload if isinstance(payload, dict) else {})})
 
                 elif node_name == "evaluator":
                     verdict = node_output.get("last_verdict", {}) or {}

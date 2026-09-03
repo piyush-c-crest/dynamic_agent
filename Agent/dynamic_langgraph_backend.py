@@ -154,6 +154,12 @@ from skills import Skill, SkillRegistry
 # project_skills/, and per-workdir .skills/ into a SkillRegistry (Phase 2)
 from skill_discovery import SkillDiscovery, SKILL_ROOTS
 
+# Live, runtime skill acquisition (v2): search/install/verify/register a
+# skill the moment a task needs it, instead of requiring an admin to have
+# pre-synced it. See skill_implementation_plan.md and skill_acquisition.py's
+# module docstring for the full design.
+from skill_acquisition import SkillAcquisitionManager, AcquisitionResult
+
 # Optional weasyprint + markdown for PDF artifact support
 try:
     import markdown as _markdown
@@ -398,6 +404,12 @@ class DynamicToolRegistry:
         self.register_tool("run_shell_command", self._shell_tool())
         self.register_tool("create_artifact", self._create_artifact_tool())
         self.register_tool("update_tasks", self._update_tasks_tool())
+        self.register_tool("request_skill_acquisition", self._request_skill_acquisition_tool())
+        # NOTE: "read_skill_resource" is intentionally NOT registered here --
+        # unlike every other built-in tool it needs a live SkillRegistry
+        # reference (to resolve skill_name -> skill.path), which this class
+        # doesn't own. DynamicAgentManager.__init__ registers it right after
+        # constructing self.skill_registry -- see that constructor.
 
     def list_artifacts(self) -> list[dict]:
         return list(self.artifacts)
@@ -989,6 +1001,119 @@ class DynamicToolRegistry:
             return {"status": "deferred", "note": "Applied by the orchestrator's tools node, not this function."}
         return update_tasks
 
+    @staticmethod
+    def _request_skill_acquisition_tool() -> BaseTool:
+        """v2 self-service skill acquisition (plan §2B / §4.1) -- the direct
+        precedent is `_update_tasks_tool` immediately above: this tool is
+        registered for every agent exactly the way update_tasks is, but its
+        actual work (running `SkillAcquisitionManager.ensure_skill`,
+        refreshing the calling agent's tool/skill set, and injecting a fresh
+        skill_directive into task_messages) needs the live graph state
+        (role, task_description, task_messages) that a plain BaseTool
+        function can't see -- so, like update_tasks, it's intercepted by
+        name in DynamicAgentManager._tools_node before this body ever runs.
+        """
+        @tool
+        def request_skill_acquisition(capability_description: str) -> dict:
+            """Acquire a new skill (a playbook of instructions, not just a
+            single tool) when you recognize mid-task that you need a
+            distinct capability no currently available tool or skill
+            provides.
+
+            Use this the moment the gap becomes clear -- don't wait until
+            the end of the task. This searches for, installs, verifies, and
+            registers a matching skill, then makes it available to you on
+            your very next turn (its instructions get spliced into your
+            context and any tools it brings become callable). If nothing
+            suitable is found or installation fails, you'll be told so
+            plainly -- continue with what you have, or ask the user for
+            guidance if the missing capability is essential to the task.
+
+            Use `update_tasks` instead, not this, if the underlying problem
+            is that your ROLE is wrong for the remaining work (e.g. "I'm a
+            writer but this needs data cleaning first") -- this tool is for
+            when your role is still right and you just need one more
+            capability.
+
+            Parameters
+            ----------
+            capability_description : str
+                A short phrase describing the capability you need, e.g.
+                "PDF report generation with styling" or "generate charts
+                from tabular data". Be specific about the capability, not
+                about the tool you imagine implementing it.
+            """
+            return {"status": "deferred", "note": "Applied by the orchestrator's tools node, not this function."}
+        return request_skill_acquisition
+
+    @staticmethod
+    def _read_skill_resource_tool(skill_registry: SkillRegistry) -> BaseTool:
+        """`read_skill_resource(skill_name, relative_path)` -- plan §6/§8.
+        Pulls the content of one file recorded under a skill's
+        `references/`, `scripts/`, `assets/`, or `templates/` folder,
+        confined to that skill's own `skill.path` the same way read_file is
+        confined to the agent workspace via resolve_and_confine. Content is
+        never read at parse/index time (skills.py's "record paths, don't
+        read content" principle) -- this is the on-demand pull-through that
+        principle exists to support.
+
+        Takes `skill_registry` as a constructor-style argument (unlike the
+        other static tool factories in this class) because resolving
+        skill_name -> skill.path needs a live registry reference this
+        class doesn't otherwise own; see _register_default_tools' note on
+        why this isn't registered there directly."""
+        @tool
+        def read_skill_resource(skill_name: str, relative_path: str) -> dict:
+            """Read the content of a resource file belonging to a skill
+            you've been given -- something listed under that skill's
+            references/, scripts/, assets/, or templates/ manifest in your
+            system prompt.
+
+            Parameters
+            ----------
+            skill_name : str
+                The exact skill name as it appears in your system prompt's
+                skill directive.
+            relative_path : str
+                The exact relative path as listed in the manifest, e.g.
+                "references/style_guide.md" or "templates/cover_page.md".
+            """
+            skill = skill_registry.get_skill(skill_name)
+            if skill is None:
+                return {"error": f"No such skill: {skill_name!r}"}
+            if not skill.path:
+                return {"error": f"Skill {skill_name!r} has no on-disk path recorded."}
+
+            all_recorded = set(skill.references) | set(skill.scripts) | set(skill.assets) | set(skill.templates)
+            if relative_path not in all_recorded:
+                return {
+                    "error": (
+                        f"{relative_path!r} is not a recorded resource of skill {skill_name!r}. "
+                        f"Available: {sorted(all_recorded)}"
+                    )
+                }
+
+            skill_dir = Path(skill.path)
+            try:
+                resolved = (skill_dir / relative_path).resolve()
+                if not resolved.is_relative_to(skill_dir.resolve()):
+                    return {"error": "Refused: resolved path escapes the skill's own folder."}
+            except (OSError, ValueError) as e:
+                return {"error": f"Could not resolve path: {e}"}
+            if not resolved.is_file():
+                return {"error": f"Recorded but missing on disk: {relative_path}"}
+
+            try:
+                content = resolved.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return {"error": f"Could not read {relative_path}: {e}"}
+
+            truncated = len(content) > MAX_READ_CHARS
+            if truncated:
+                content = content[:MAX_READ_CHARS]
+            return {"skill": skill_name, "path": relative_path, "content": content, "truncated": truncated}
+        return read_skill_resource
+
     @traceable(name="create_tool_from_prompt", run_type="chain")
     def create_tool_from_prompt(self, prompt: str, tool_name: str) -> BaseTool:
         """Create a new tool from a natural language prompt, run in an isolated venv + subprocess sandbox."""
@@ -1206,9 +1331,16 @@ class DynamicToolRegistry:
 
 class DynamicAgentFactory:
     """Creates and caches specialized sub-agents (system_prompt, tools, llm) at runtime."""
-    def __init__(self, tool_registry: DynamicToolRegistry, skill_registry: SkillRegistry):
+    def __init__(self, tool_registry: DynamicToolRegistry, skill_registry: SkillRegistry, skill_acquisition: "SkillAcquisitionManager | None" = None):
         self.tool_registry = tool_registry
         self.skill_registry = skill_registry
+        self.skill_acquisition = skill_acquisition
+        """v2: when set, create_agent/refresh_tools resolve a "skill_gap"
+        reported by the selection LLM into a real, live-acquired skill
+        before finalizing the agent config (plan §2A/§4.1). None is a
+        supported/degraded mode -- if a caller constructs this factory
+        without one, skill_gap is simply logged and ignored, same as if
+        the LLM had omitted it."""
         self.agents: dict[str, dict] = {}
 
     def get_or_create(self, role: str, task_description: str, goal: str) -> dict:
@@ -1272,11 +1404,54 @@ class DynamicAgentFactory:
                     extra_tool_names.extend(self._create_missing_tools(skill.bundled_tool_specs))
         return applied_skills, extra_tool_names
 
+    @traceable(name="resolve_skill_gap", run_type="chain")
+    def _resolve_skill_gap(self, skill_gap: str, task_description: str) -> tuple[list[str], list[str]]:
+        """v2 config-time acquisition trigger (plan §2A/§4.1): when the
+        selection LLM reports a "skill_gap" -- a capability it couldn't
+        match to anything in the current registry -- run it through
+        SkillAcquisitionManager.ensure_skill() *before* the agent's system
+        prompt is finalized, so the very first skill_directive() splice
+        already includes it if acquisition succeeds.
+
+        Returns (applied_skill_names, extra_tool_names), same shape as
+        _apply_skills, so callers can just union the results in. Empty
+        lists on any non-success outcome (already-present skills are
+        resolved the normal way via the "skills" field, not this path) --
+        this never raises and never blocks agent creation on a failed
+        acquisition; the gap is simply logged and the agent proceeds
+        without that capability, same as if the LLM had returned no skill
+        at all.
+        """
+        if not skill_gap or self.skill_acquisition is None:
+            if skill_gap:
+                _log("WARNING", "skill_gap reported but no SkillAcquisitionManager configured; ignoring", skill_gap=skill_gap)
+            return [], []
+
+        result: AcquisitionResult = self.skill_acquisition.ensure_skill(skill_gap, task_description)
+        if result.status not in ("installed", "already_present") or not result.skill_name:
+            _log(
+                "SKILL-ACQUISITION", "Config-time skill_gap did not resolve to a usable skill",
+                skill_gap=skill_gap, status=result.status, reason=result.reason, phase="failed" if result.status == "failed" else "ready",
+            )
+            return [], []
+
+        _log(
+            "SKILL-ACQUISITION", "Config-time skill_gap resolved; applying skill to agent",
+            skill_gap=skill_gap, skill=result.skill_name, status=result.status,
+        )
+        return self._apply_skills([result.skill_name])
+
     def skill_directive(self, skill_names: list[str]) -> str:
         """Splice each selected skill's instructions into the agent's
         effective system prompt, appended after tool_directive. Rebuilt
         fresh every task the same way tool_directive is, so a skill added
-        later via refresh_tools takes effect without recreating the agent."""
+        later via refresh_tools takes effect without recreating the agent.
+
+        v2 additionally appends each skill's resource manifest (plan §6) --
+        the recorded references/scripts/assets/templates paths, not their
+        content -- so the agent knows what it can pull via
+        read_skill_resource()/run_shell_command() without those files being
+        read until actually requested."""
         if not skill_names:
             return ""
         parts = []
@@ -1284,7 +1459,16 @@ class DynamicAgentFactory:
             skill = self.skill_registry.get_skill(name)
             if skill is None or not skill.instructions:
                 continue
-            parts.append(f"--- SKILL: {skill.name} ---\n{skill.instructions}")
+            block = f"--- SKILL: {skill.name} ---\n{skill.instructions}"
+            manifest_lines = (
+                [f"- references/{p} — read on demand via read_skill_resource('{skill.name}', 'references/{p}')" for p in skill.references]
+                + [f"- scripts/{p} — run via run_shell_command(command=..., cwd='{skill.path}')" for p in skill.scripts]
+                + [f"- assets/{p} — pull via read_skill_resource('{skill.name}', 'assets/{p}')" for p in skill.assets]
+                + [f"- templates/{p} — pull via read_skill_resource('{skill.name}', 'templates/{p}')" for p in skill.templates]
+            )
+            if manifest_lines:
+                block += "\n\nResources available for this skill:\n" + "\n".join(manifest_lines)
+            parts.append(block)
         if not parts:
             return ""
         return "\n\n" + "\n\n".join(parts)
@@ -1308,7 +1492,8 @@ Return ONLY JSON in this exact shape:
 {{
   "tools": ["tool_name1", "tool_name2"],
   "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}],
-  "skills": ["skill_name1"]
+  "skills": ["skill_name1"],
+  "skill_gap": "short phrase describing a missing specialized capability, or omit entirely"
 }}
 
 Rules:
@@ -1323,6 +1508,10 @@ Rules:
   skills) this new task clearly needs. This is usually empty -- only add
   a skill if its playbook is a genuine match for the new task, not just
   loosely related.
+- "skill_gap": if no available skill's description is a genuine match but
+  this new task clearly needs a specialized capability (a playbook, not
+  just a tool), set this to a short phrase describing that capability.
+  Otherwise omit it entirely.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
         _log("AI-REQUEST", "Refreshing agent tool selection", role=role, current_tools=agent_conf["tool_names"], current_skills=agent_conf.get("skill_names", []))
@@ -1343,9 +1532,12 @@ Rules:
 
         created_tool_names = self._create_missing_tools(result.get("new_tools", []))
         applied_skill_names, skill_tool_names = self._apply_skills(result.get("skills", []) or [])
+        gap_skill_names, gap_tool_names = self._resolve_skill_gap(result.get("skill_gap", ""), task_description)
+        applied_skill_names = applied_skill_names + gap_skill_names
+        skill_tool_names = skill_tool_names + gap_tool_names
 
         desired_names = (
-            {"update_tasks"}  # every agent can revise the upcoming plan, regardless of role
+            {"update_tasks", "request_skill_acquisition"}  # every agent can revise the plan / pull in a missing skill, regardless of role
             | set(result.get("tools", []))
             | set(agent_conf["tool_names"])
             | set(created_tool_names)
@@ -1400,7 +1592,8 @@ Return ONLY JSON in this exact shape:
   "system_prompt": "a system prompt defining this agent's persona, scope and behavior",
   "tools": ["tool_name1", "tool_name2"],
   "new_tools": [{{"name": "snake_case_tool_name", "prompt": "one self-contained instruction describing what this new tool must do"}}],
-  "skills": ["skill_name1"]
+  "skills": ["skill_name1"],
+  "skill_gap": "short phrase describing a missing specialized capability, or omit entirely"
 }}
 
 Rules:
@@ -1414,6 +1607,10 @@ Rules:
   above. A skill is a playbook of instructions, not just a tool -- select
   one ONLY if its description is a clear match for this role's work.
   Usually 0-1 skills, at most 2. It is fine, and common, to select zero.
+- "skill_gap": if no available skill's description is a genuine match but
+  this role clearly needs a specialized capability (a playbook, not just a
+  tool), set this to a short phrase describing that capability. Otherwise
+  omit it entirely.
 - Do not propose more than {AUTO_TOOL_LIMIT} new tools.
 """
         _log("AI-REQUEST", "Selecting tools and instructions for new agent", role=role)
@@ -1439,8 +1636,11 @@ Rules:
 
         created_tool_names = self._create_missing_tools(config.get("new_tools", []))
         applied_skill_names, skill_tool_names = self._apply_skills(config.get("skills", []) or [])
+        gap_skill_names, gap_tool_names = self._resolve_skill_gap(config.get("skill_gap", ""), task_description)
+        applied_skill_names = applied_skill_names + gap_skill_names
+        skill_tool_names = skill_tool_names + gap_tool_names
         all_tool_names = list(dict.fromkeys(
-            ["update_tasks"]  # every agent can revise the upcoming plan, regardless of role
+            ["update_tasks", "request_skill_acquisition"]  # every agent can revise the plan / pull in a missing skill, regardless of role
             + config.get("tools", []) + created_tool_names + skill_tool_names
         ))
 
@@ -1506,7 +1706,22 @@ class DynamicAgentManager:
         this on demand (e.g. after dropping in a new SKILL.md without
         restarting); set_working_directory() below additionally indexes
         <workdir>/.skills/ whenever a thread selects a cowork folder."""
-        self.agent_factory = DynamicAgentFactory(self.tool_registry, self.skill_registry)
+        self.skill_acquisition = SkillAcquisitionManager(self.skill_registry, self.skill_discovery)
+        """v2: live, runtime skill discovery/installation/verification,
+        shared process-wide (one lock table, one cache) the same way
+        tool_registry/skill_registry already are. Wired into agent_factory
+        below so create_agent/refresh_tools can resolve a config-time
+        "skill_gap", and referenced directly from _tools_node for the
+        execution-time request_skill_acquisition tool (plan §2)."""
+        self.agent_factory = DynamicAgentFactory(self.tool_registry, self.skill_registry, self.skill_acquisition)
+        self.tool_registry.register_tool(
+            "read_skill_resource",
+            self.tool_registry._read_skill_resource_tool(self.skill_registry),
+        )
+        """Registered here rather than in DynamicToolRegistry's own
+        _register_default_tools -- see that method's note -- because this
+        tool needs a live SkillRegistry reference that only exists once
+        self.skill_registry above has been constructed."""
         self.behavior_style = "standard"
         self.extra_instruction = ""
         self.temperature = 0.0
@@ -1807,6 +2022,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         _log("WORKFLOW", "Executing tool calls", task_id=task["id"], call_count=len(tool_calls))
         tool_messages = []
         pending_images: list[dict] = []
+        pending_skill_directives: list[str] = []  # skill_directive() text from any successful mid-task acquisition this turn
         updated_plan = None  # only set if an update_tasks call actually changed the plan this turn
         for call in tool_calls:
             tool_name = call["name"]
@@ -1826,6 +2042,50 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                     tool_args.get("operations_json", "[]"),
                 )
                 _log_block("TOOL-RESULT", "✓ update_tasks result", str(result))
+                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"], name=tool_name))
+                continue
+
+            if tool_name == "request_skill_acquisition":
+                # v2 self-service acquisition (plan §2B/§4.12/§4.13).
+                # Special-cased for the same reason update_tasks is above:
+                # turning a successful acquisition into "the agent can
+                # actually use it next turn" requires refresh_tools(role,
+                # task_description) -- which mutates self.agent_factory's
+                # live agent config -- plus injecting a fresh
+                # skill_directive() HumanMessage into THIS task's
+                # task_messages, neither of which a plain BaseTool function
+                # can reach.
+                capability_description = tool_args.get("capability_description", "")
+                acquisition_result = self.agent_factory.skill_acquisition.ensure_skill(
+                    capability_description, task["description"]
+                ) if self.agent_factory.skill_acquisition is not None else AcquisitionResult(
+                    status="failed", skill_name=None, reason="no SkillAcquisitionManager configured",
+                )
+                if acquisition_result.status in ("installed", "already_present") and acquisition_result.skill_name:
+                    self.agent_factory.refresh_tools(task["agent_role"], task["description"])
+                    directive = self.agent_factory.skill_directive([acquisition_result.skill_name])
+                    if directive:
+                        pending_skill_directives.append(directive)
+                    result = {
+                        "status": acquisition_result.status,
+                        "skill_name": acquisition_result.skill_name,
+                        "note": (
+                            f"Skill '{acquisition_result.skill_name}' is now available to you -- its "
+                            "instructions and resource manifest are attached below. Its tools (if any) "
+                            "are callable starting your very next turn."
+                        ),
+                    }
+                else:
+                    result = {
+                        "status": acquisition_result.status,
+                        "reason": acquisition_result.reason,
+                        "note": (
+                            f"Could not acquire a skill for '{capability_description}' ({acquisition_result.reason}). "
+                            "Continue with your currently available tools, or ask the user for guidance if this "
+                            "capability is essential to completing the task."
+                        ),
+                    }
+                _log_block("TOOL-RESULT", "✓ request_skill_acquisition result", str(result))
                 tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"], name=tool_name))
                 continue
 
@@ -1870,9 +2130,19 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             )
             updated_task_messages = updated_task_messages + [image_message]
             extra_messages = extra_messages + [image_message]
+        if pending_skill_directives:
+            # Same injection pattern _evaluator_node's RETRY branch already
+            # uses for feedback_msg (plan §4.13) -- task_messages persists
+            # across the rest of the task, so a fresh HumanMessage here is
+            # enough; there's no need to rebuild the original SystemMessage.
+            directive_message = HumanMessage(
+                content="A skill you requested is now available:" + "".join(pending_skill_directives)
+            )
+            updated_task_messages = updated_task_messages + [directive_message]
+            extra_messages = extra_messages + [directive_message]
 
         # Mirrored into `messages` too, same reason as agent_executor_node above
-        _log("WORKFLOW", "Tool execution complete; returning to task agent", task_id=task["id"], image_results=len(pending_images))
+        _log("WORKFLOW", "Tool execution complete; returning to task agent", task_id=task["id"], image_results=len(pending_images), skills_acquired=len(pending_skill_directives))
         output = {"task_messages": updated_task_messages, "messages": extra_messages}
         if updated_plan is not None:
             _log("WORKFLOW", "Task plan revised via update_tasks", task_id=task["id"], new_task_count=len(updated_plan))
@@ -1937,6 +2207,10 @@ invocation is. If the task requires taking or verifying an action
 (moving/renaming/writing files, running a command, checking real state) but
 the ground truth above shows no matching tool was actually invoked, that
 MUST be a RETRY regardless of how complete or detailed the text sounds.
+If the shortfall looks like a missing SPECIALIZED CAPABILITY (a playbook the
+agent doesn't have) rather than a wrong approach with the tools it already
+has, mention in "feedback" that the agent can call request_skill_acquisition
+for that capability.
 Respond with ONLY JSON:
 {{"status": "PASS" or "RETRY", "reason": "short reason", "feedback": "what to fix if RETRY"}}
 """

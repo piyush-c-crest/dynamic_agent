@@ -64,6 +64,12 @@ _LOG_TAG_COLORS = {
     "FINAL-RESPONSE": _Ansi.GREEN,
     "WARNING": _Ansi.YELLOW,
     "ERROR": _Ansi.RED,
+    "SKILL-ACQUISITION": _Ansi.MAGENTA,
+    # v2 live skill acquisition (skill_acquisition.py) -- same family as
+    # TOOL-CREATION (also an on-the-fly "the system just gained a new
+    # capability" event), functionally unnecessary since _log falls back to
+    # CYAN for any unlisted tag, but listed explicitly so its color is a
+    # deliberate choice rather than an accident of the default.
 }
 
 

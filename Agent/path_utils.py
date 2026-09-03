@@ -43,14 +43,33 @@ DEFAULT_AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
 # Internal directories the agent must never read from or write to
 _AGENT_DATA_DIR_NAMES = ("DB", "tool_envs", "tools", "logs")
 
+# Skill-root directories (skills.py/skill_discovery.py's SKILL_ROOTS, plus
+# skill_acquisition.py's dev/test staging folder) are also off-limits to
+# ordinary, workdir-confined agent file operations (read_file/write_file/
+# list_directory/run_shell_command's cwd, and workdir selection itself).
+# Under normal operation these already sit outside current_workdir() and so
+# are unreachable anyway -- this closes the narrower gap where a thread's
+# workdir happens to BE (or contain) the repo root, which would otherwise
+# let an agent's own write_file/run_shell_command silently edit or delete a
+# live-installed skill out from under the registry. This is intentionally
+# separate from `read_skill_resource`'s access model (skill_acquisition.py
+# / dynamic_langgraph_backend.py's _read_skill_resource_tool): that tool
+# deliberately reads INTO a skill's own folder via a whitelist of paths
+# recorded on the Skill object at parse time, bypassing this workdir
+# confinement by design -- it is not the same trust boundary as "can this
+# task's ordinary file tools reach this folder by accident".
+_SKILL_ROOT_DIR_NAMES = ("skills", "github_skills", "community_skills", "project_skills", "skill_acquisition_staging")
+
 
 def _agent_data_roots() -> list[Path]:
-    return [Path(name).resolve() for name in _AGENT_DATA_DIR_NAMES]
+    return [Path(name).resolve() for name in _AGENT_DATA_DIR_NAMES + _SKILL_ROOT_DIR_NAMES]
 
 
 _APP_DATA_ERROR = (
     "Refused: this path is inside the application's internal data directory "
-    "(DB, tool_envs, tools, logs) -- never a target for agent file operations."
+    "(DB, tool_envs, tools, logs, or a skill root -- skills, github_skills, "
+    "community_skills, project_skills, skill_acquisition_staging) -- never a "
+    "target for agent file operations."
 )
 
 
