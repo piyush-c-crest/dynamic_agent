@@ -107,6 +107,28 @@ def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return frontmatter, body
 
 
+# The four recognized resource subfolders (v2 plan §6). Order here is the
+# order they're recorded in on a Skill -- purely cosmetic, doesn't affect
+# behavior.
+_RESOURCE_SUBFOLDERS = ("references", "scripts", "assets", "templates")
+
+
+def _scan_resource_folder(skill_dir: Path, folder_name: str) -> list[str]:
+    """List every file under `<skill_dir>/<folder_name>/`, recursively, as
+    paths relative to `skill_dir` (posix-style, e.g. "scripts/build.py").
+    Records paths only -- content is never read here, same principle as
+    the rest of skill parsing; an agent pulls actual content on demand via
+    read_skill_resource() later. Missing folder -> empty list, not an error."""
+    folder = skill_dir / folder_name
+    if not folder.is_dir():
+        return []
+    return sorted(
+        p.relative_to(skill_dir).as_posix()
+        for p in folder.rglob("*")
+        if p.is_file()
+    )
+
+
 def _parse_list(raw: str) -> list[str]:
     """Parse a frontmatter value like `a, b, c` or `[a, b, c]` into a list."""
     if not raw:
@@ -154,15 +176,20 @@ class SkillDiscovery:
             _log("WARNING", "SKILL.md has no description; agents won't be able to tell what it's for", skill=name, path=str(skill_md))
 
         default_trust = "untrusted" if source in _UNTRUSTED_DEFAULT_SOURCES else "trusted"
+        skill_dir = skill_md.parent
 
         return Skill(
             name=name,
             description=description,
             instructions=body,
             source=source,
-            path=str(skill_md.parent),
+            path=str(skill_dir),
             tool_names=_parse_list(frontmatter.get("tools", "")),
             bundled_tool_specs=_parse_bundled_tools(frontmatter.get("bundled_tools", ""), name),
+            references=_scan_resource_folder(skill_dir, "references"),
+            scripts=_scan_resource_folder(skill_dir, "scripts"),
+            assets=_scan_resource_folder(skill_dir, "assets"),
+            templates=_scan_resource_folder(skill_dir, "templates"),
             triggers=_parse_list(frontmatter.get("triggers", "")),
             version=frontmatter.get("version", "1.0"),
             trust=frontmatter.get("trust", default_trust),
@@ -195,6 +222,34 @@ class SkillDiscovery:
             if self.registry.register_skill(skill):
                 registered += 1
         return registered
+
+    def index_single(self, skill_dir: Path, source: str = "github") -> Skill | None:
+        """Parse and register exactly one already-verified skill folder,
+        without walking any root directory tree. This is the mid-task hot
+        path `SkillAcquisitionManager.ensure_skill()` calls right after a
+        live-installed package passes `_verify()` (v2 plan §4.10) -- it's
+        deliberately NOT `index_root`/`index_all` run against a single
+        entry, because those re-derive the whole `<root>/<name>/SKILL.md`
+        walk and re-check every skill's precedence, which is unnecessary
+        latency for "one folder just appeared" (§4.11).
+
+        Returns the parsed Skill on success (even if `register_skill`
+        rejected it for being lower-precedence than an existing skill of
+        the same name -- that's a registry decision, not a parse failure),
+        or None if `SKILL.md` is missing or unreadable.
+        """
+        skill_dir = Path(skill_dir)
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            _log("WARNING", "index_single: no SKILL.md in target folder", path=str(skill_dir))
+            return None
+        try:
+            skill = self._parse_skill_md(skill_md, source)
+        except (OSError, UnicodeDecodeError) as e:
+            _log("WARNING", "index_single: could not read SKILL.md", path=str(skill_md), error=str(e))
+            return None
+        self.registry.register_skill(skill)
+        return skill
 
     def index_workdir(self, workdir: Path) -> int:
         """Index the `.skills/` folder of a selected cowork working

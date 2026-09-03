@@ -64,6 +64,22 @@ class Skill:
     aren't registered yet. Phase 3 routes these through
     DynamicToolRegistry.create_tool_from_prompt(), the same sandboxed
     validation path used for auto-created tools -- never executed directly."""
+    references: list[str] = field(default_factory=list)
+    """Relative paths under `references/` -- domain knowledge the agent can
+    read on demand via read_skill_resource(). Paths only, never content --
+    same "record paths, don't read content" principle as the rest of this
+    dataclass. Populated by skill_discovery's SKILL.md parsing."""
+    scripts: list[str] = field(default_factory=list)
+    """Relative paths under `scripts/` -- executed via the existing
+    run_shell_command(cwd=skill.path) tool, not a new mechanism."""
+    assets: list[str] = field(default_factory=list)
+    """Relative paths under `assets/` -- boilerplate/templates the output
+    should be based on, pulled via read_skill_resource()."""
+    templates: list[str] = field(default_factory=list)
+    """Relative paths under `templates/` -- same treatment as `assets/`,
+    kept as a distinct recognized folder name since skill authors commonly
+    separate "reusable boilerplate to copy" from "reference material to
+    read" (see skill_implementation_plan.md v2 §6)."""
     triggers: list[str] = field(default_factory=list)
     """Optional keywords/phrases that hint when this skill applies. Not
     used for matching yet in Phase 1; Phase 3's selection prompt may
