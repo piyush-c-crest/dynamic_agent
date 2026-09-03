@@ -1,240 +1,340 @@
-# Dynamic Skill Architecture — Evaluation & Implementation Plan
+# Dynamic Skill Architecture v2 — Live Runtime Discovery, Acquisition & Usage
 
-## 1. Verdict
+## 0. What changed from v1
 
-**`vercel-labs/skills` is useful, but only as an *installer/content source*, not as a runtime component.** It's a Node.js CLI (`npx skills add ...`) that copies whole skill directories onto disk. There's no Python SDK, no importable library, no in-process API — your backend can't "call into" it at request time. So it cannot become "the discovery/installation mechanism" in the sense of a live dependency your orchestrator talks to per-task.
+v1 treated skill installation as an **admin operation**: someone runs `npx skills add` or hits `/skills/sync` ahead of time, `SkillDiscovery` indexes it, and only *then* does it become selectable. That's gone.
 
-What it *is* good for: it's a convenient way to physically fetch a full, well-formed skill package (`SKILL.md` + `references/` + `scripts/` + `assets/`) from a GitHub repo onto your disk, via a shell-out (`subprocess`/`run_shell_command`), landing it inside `github_skills/`. After that, it's out of the picture — your own `SkillDiscovery` → `SkillRegistry` → `DynamicAgentFactory` pipeline takes over exactly as it does today.
+v2's rule: **a skill that doesn't exist locally yet is just a candidate the agent hasn't acquired yet.** Discovery, installation, verification, and indexing all happen inline, during task execution, triggered by the running agent itself — not by you.
 
-**Your existing architecture should absolutely stay.** It's already, structurally, the right shape:
-- `Skill`/`SkillRegistry` already model source, trust, path, tool bindings.
-- `SkillDiscovery` already does folder-based, format-compatible indexing.
-- `DynamicAgentFactory.create_agent`/`refresh_tools` already do LLM-driven selection with a `"skills": [...]` field, already splice instructions via `skill_directive()`, already pull a skill's tools in via `_apply_skills()`.
-
-You've unknowingly already built two of the three levels of "progressive disclosure" the vercel spec itself describes (name+description always shown → full instructions loaded on selection). The only real gap is **level 3**: `references/`, `scripts/`, `assets/` aren't discovered or loadable yet. That's a targeted extension, not a redesign.
-
-**Two real gaps this exercise surfaced, unrelated to vercel-labs/skills itself, worth fixing regardless:**
-- `DynamicAgentFactory.get_or_create` never calls `refresh_tools` — the call is present but literally commented out (`# not need for now`). Once a role exists, it can never pick up an additional skill on a later task with that role. This is the single biggest blocker to requirement #8 ("discover another skill if the first was insufficient").
-- The system prompt (where `skill_directive()` gets spliced in) is only built once per task, on the *first* attempt (`if not task_messages: ...`). On a retry within the same task, even if `refresh_tools` ran and added a skill, the SystemMessage is never rebuilt — the new instructions would never reach the LLM unless injected some other way.
-
-Both are addressed in section 6.
+The core mechanism that makes this work without redesigning your graph: **skill acquisition becomes a capability, exposed the same way `update_tasks` already is — as something the agent's own execution loop can reach for.** No new LangGraph node, no new async orchestration layer, no bespoke state machine. One new manager class, one new always-available tool, and one new inline check inside the existing agent-creation/refresh prompts.
 
 ---
 
-## 2. Current architecture — what's reusable as-is
+## 1. What we already have (unchanged reuse)
 
-| Piece | File | Reuse as-is? |
+| Piece | File | Role in v2 |
 |---|---|---|
-| `Skill` dataclass (`name`, `description`, `instructions`, `source`, `path`, `tool_names`, `bundled_tool_specs`, `triggers`, `trust`) | `skills.py` | Yes — extend with 3 new optional fields, don't restructure |
-| `SkillRegistry` (register/get/list/persist, source precedence) | `skills.py` | Yes, unchanged |
-| `SkillDiscovery.index_root` / `_parse_skill_md` (walks `<root>/<name>/SKILL.md`, parses frontmatter) | `skill_discovery.py` | Yes, extend `_parse_skill_md` to also record resource subfolders |
-| `SKILL_ROOTS` (`local`/`github`/`community`/`project`) + `index_workdir` | `skill_discovery.py` | Yes, unchanged |
-| `DynamicAgentFactory.create_agent` / `refresh_tools` — LLM sees `skill_registry.list_skills()`, returns `"skills": [...]`, `_apply_skills()` resolves them | `dynamic_langgraph_backend.py` | Yes — this IS your selection engine, extend it, don't replace it |
-| `skill_directive()` (splices instructions into system prompt) | `dynamic_langgraph_backend.py` | Yes, extend to also append a resource manifest |
-| `run_shell_command` tool, supports arbitrary `cwd` | `dynamic_langgraph_backend.py` | Yes — this is your `scripts/` execution mechanism, no new tool needed |
-| `_update_tasks_tool` / `_apply_task_plan_update` (agent can mid-task insert/edit/remove upcoming tasks) | `dynamic_langgraph_backend.py` | Yes — this is your multi-skill decomposition mechanism (see §9), not something to duplicate |
-| Evaluator's RETRY branch (`_evaluator_node`), which injects a `HumanMessage` and loops back to `_agent_executor_node` | `dynamic_langgraph_backend.py` | Yes — this is the natural hook point for "try again with a new skill" (see §6) |
-| `Skill.trust` + untrusted-bundled-tool gate in `_apply_skills` | `dynamic_langgraph_backend.py` | Keep the code, don't rip it out — just default synced skills to `trust="trusted"` for this phase instead of deleting the mechanism (see §14) |
+| `Skill` dataclass | `skills.py` | Unchanged shape (v1's `references`/`scripts`/`assets` additions still apply, plus `templates` — see §6) |
+| `SkillRegistry` | `skills.py` | Unchanged — still the single source of truth the agent selection prompt reads from |
+| `SkillDiscovery.index_root` / `_parse_skill_md` | `skill_discovery.py` | Reused, but no longer the only entry point — see new `index_single` in §4.10 |
+| `DynamicAgentFactory.create_agent` / `refresh_tools` / `_apply_skills` / `skill_directive` | `dynamic_langgraph_backend.py` | Unchanged mechanics, extended with one new field each (`skill_gap`) — see §4.1 |
+| `_evaluator_node` RETRY branch, `feedback_msg` injection pattern | `dynamic_langgraph_backend.py` | Reused as the message-injection pattern for "a skill just became available" — see §4.13 |
+| `run_shell_command(cwd=...)` | `dynamic_langgraph_backend.py` | Reused both for skill `scripts/` execution *and* as the mechanism that shells out to the `skills` CLI itself |
+| `update_tasks` — always-available agent tool | `dynamic_langgraph_backend.py` | Direct precedent for the new `request_skill_acquisition` tool — same pattern, same trust level |
+| Existing SSE status-event streaming (plan/status/evaluation "Working" blocks) | `main.py` (not in this repo snapshot, referenced from memory) | Reused, not replaced — see §5 |
 
-**What's missing** (net-new, not a rewrite of anything above): resource-file awareness on `Skill`, a sync utility to populate `github_skills/` with full packages, a scoped resource-reading tool, and re-enabling the two wiring gaps above.
+**What's net-new:** a `SkillAcquisitionManager` (new module `skill_acquisition.py`), one new always-on tool, two small inline hooks in `create_agent`/`refresh_tools`, and a targeted single-skill indexer.
 
 ---
 
-## 3. Target architecture
+## 2. Core architectural decision: acquisition as a capability, not a phase
+
+Everything in this document routes through one function:
 
 ```
-                     ┌─────────────────────────────┐
-                     │  vercel-labs/skills CLI      │   (external, shell-out only)
-                     │  npx skills add <repo> --skill <name> -y
-                     └───────────────┬─────────────┘
-                                     │ writes full package to disk
-                                     ▼
-                        github_skills/<name>/
-                          ├── SKILL.md
-                          ├── references/*.md
-                          ├── scripts/*.py
-                          └── assets/*
-
-                                     │ (Phase 2, extended)
-                                     ▼
-                        SkillDiscovery.index_root()
-                          -> parses SKILL.md
-                          -> RECORDS (doesn't read) references/scripts/assets paths
-                                     │
-                                     ▼
-                        SkillRegistry  (unchanged)
-                                     │
-                                     ▼
-              DynamicAgentFactory.create_agent / refresh_tools
-                  Level 1: name+description shown to LLM (existing)
-                  Level 2: instructions spliced on selection (existing)
-                  Level 3: resource manifest appended, NOT full content (new)
-                                     │
-                                     ▼
-                    Agent's system/task prompt + tool set
-                       - skill.tool_names           (existing _apply_skills)
-                       - read_skill_resource tool    (new, scoped to skill.path)
-                       - run_shell_command w/ cwd    (existing, for scripts/)
+SkillAcquisitionManager.ensure_skill(capability_description: str, task_description: str) -> AcquisitionResult
 ```
 
-Nothing upstream of `SkillRegistry` changes shape. Everything downstream of it (selection, splicing, tool binding) is the same mechanism you already have, extended by one more disclosure level.
+`AcquisitionResult` = `{status: "already_present" | "installed" | "not_found" | "failed", skill_name: str | None, reason: str}`
+
+This function is **synchronous, idempotent, and safe to call repeatedly.** It's called from exactly two places:
+
+**A. Config-time (upfront gap)** — inside `create_agent()` / `refresh_tools()`, when the selection LLM's JSON reports a capability gap (new `"skill_gap"` field, sibling to the existing `"new_tools"` field — same pattern you already use for tools). This covers your example: *"Create a professional PDF report"* → no local skill matches → `ensure_skill("PDF/report generation")` runs **before** the agent's first system prompt is finalized, so the very first `skill_directive()` splice already includes it.
+
+**B. Execution-time (self-service mid-task)** — a new tool, `request_skill_acquisition(capability_description: str)`, always registered for every agent (exactly like `update_tasks` is). The agent calls it itself when it recognizes a gap while already working — your "started with Skill A, realizes it needs B" case. It runs through `_tools_node` like any other tool call: no graph change, no state loss, `task_messages` just gets a new `ToolMessage`.
+
+Both call sites share one manager, one lock table, one cache, one verification routine. Nothing about *how* acquisition works differs between "obvious upfront gap" and "discovered mid-task" — only *when* it's triggered differs.
 
 ---
 
-## 4. What `vercel-labs/skills` (the CLI) should be responsible for
+## 3. Runtime execution flow (your example, mapped to real code)
 
-- Fetching a **complete, correctly-scoped** skill package from a GitHub/GitLab repo into `github_skills/<name>/` on disk.
-- Nothing else. It should never run inside your process, never be given selection authority, never be trusted to decide *which* skill is relevant to a task — that's still yours.
-
-Invoked as a subprocess, e.g. (illustrative, not literal code to write yet):
 ```
-npx skills add <owner>/<repo> --skill <name> -y --agent generic
+User: "Create a professional PDF report from these documents."
+  │
+  ▼
+_planner_node                          — unchanged, produces task_plan
+  │
+  ▼
+_agent_executor_node → agent_factory.get_or_create(role="report_writer", ...)
+  │
+  ▼
+create_agent(): selection LLM sees Available tools + Available skills (local registry)
+  → none matches "PDF generation" well
+  → LLM returns "skill_gap": "PDF report generation with styling"
+  │
+  ▼
+SkillAcquisitionManager.ensure_skill("PDF report generation with styling", task_description)
+  │
+  ├─ 1. Registry/cache check (§4.16) — not present, continue
+  ├─ 2. Acquire per-key lock (§4.14) — "pdf report generation" key
+  ├─ 3. Discover candidates — shell `skills find "pdf report generation"` (§4.2/4.3)
+  ├─ 4. Rank + quality-gate candidates (§4.3)
+  ├─ 5. Install top candidate — shell `skills add <owner/repo> --skill <name> -y` (§4.4/4.5)
+  ├─ 6. Verify package on disk — SKILL.md + declared subfolders (§4.9)
+  ├─ 7. Targeted index — SkillDiscovery.index_single() registers it (§4.10/4.11)
+  ├─ 8. Release lock, cache result
+  │
+  ▼
+create_agent() resumes: skill now appears in `skill_registry.list_skills()`
+  → _apply_skills() binds its tools, skill_directive() splices instructions + resource
+    manifest into the system prompt (Level 2 + Level 3, unchanged from v1 §8)
+  │
+  ▼
+Agent executes: reads references/ on demand, runs scripts/ via run_shell_command,
+  pulls assets/templates via read_skill_resource, generates the report
+  │
+  ▼
+_evaluator_node: PASS → _assembler_node → END
+                 RETRY → loop back to _agent_executor_node (unchanged v1 mechanism;
+                          agent may call request_skill_acquisition again if the
+                          feedback reveals a second missing capability)
 ```
-targeting a path under `github_skills/`. If a non-interactive/agent-agnostic flag doesn't exist for your use case, fall back to their documented download API (`https://skills.sh/api/download/{owner}/{repo}/{skill}`), which returns a scoped tarball/snapshot of just that skill's own folder — avoiding the whole-monorepo bug you saw reported.
 
-## 5. What your Dynamic Agent system remains responsible for
-
-- Deciding **whether** a task needs a skill at all (already: LLM may return `"skills": []`).
-- Deciding **which** skill, from your own registry, not from vercel's live catalog at request time (your registry is the source of truth; vercel's catalog is only ever consulted to *populate* `github_skills/`, offline/on-demand, never mid-task).
-- Binding a skill's tools into the agent (`_apply_skills`, existing).
-- Splicing instructions into the prompt (`skill_directive`, existing).
-- Deciding whether one skill was enough, or a retry/second skill/task-split is needed (existing evaluator + `update_tasks`, extended per §6/§9/§10).
-- All trust/execution-safety decisions (existing `Skill.trust` gate).
+Nothing upstream of `create_agent`/`_agent_executor_node` changes. Nothing about the graph's shape changes. The acquisition pipeline is a function call that happens to shell out and touch disk, same category of operation as `_create_missing_tools()` already is today.
 
 ---
 
-## 6. Detailed execution flow
+## 4. The installation lifecycle — point by point
 
-**A. Populating the catalog (offline / on-demand, not part of the hot path)**
-1. You (or an admin tool) run a sync step — either manually via `npx skills add`, or via a small wrapper function — targeting `github_skills/`.
-2. Next reindex (`POST /skills/reindex`, or next startup) picks it up via the existing `SkillDiscovery.index_root("github_skills", "github")`.
+### 4.1 How the agent triggers live discovery
 
-**B. Per-task selection (hot path — unchanged trigger points, extended payload)**
-1. Planner produces `task_plan` as today — **no change**. Skill awareness stays out of the planner, consistent with your own stated principle that weaker OSS models drift when given more to self-track; the planner keeps doing task decomposition only.
-2. `_agent_executor_node` calls `agent_factory.get_or_create(role, task_description, goal)`.
-3. **First time this role is created:** `create_agent()` runs as today — LLM sees tools + skills (name/description), returns `"skills": [...]`, `_apply_skills()` resolves them, `skill_directive()` splices instructions (Level 2) **plus a new resource manifest** (Level 3 — filenames only, e.g. `references/api-patterns.md — API design conventions`, `scripts/generate_chart.py — renders a chart from CSV`) into the system prompt.
-4. **If the role already exists (repeat task, same or later in the plan):** `get_or_create` currently short-circuits and returns the cached agent untouched. **Change this** to call `refresh_tools` when the task description differs meaningfully from what created the agent (simplest version: always call `refresh_tools`, since it already only *expands* tools/skills and is cheap — one extra LLM call per task, in line with your existing per-task LLM call budget).
-5. If, mid-task, the agent needs a resource file it only knows about by name (from the Level-3 manifest), it calls the new `read_skill_resource(skill_name, relative_path)` tool, which is confined to that skill's own folder and returns the file's text — pulled in on demand, not pre-loaded.
-6. If the agent needs to run a bundled script, its own spliced instructions (which the skill author wrote, e.g. "run `scripts/build_report.py` with `run_shell_command`") tell it to call the **existing** `run_shell_command(command=..., cwd=skill.path)` — no new tool.
+Two triggers, one manager (§2). Concretely:
+- `create_agent`/`refresh_tools` prompts get one new instruction: *"If no available skill's description is a genuine match but this role clearly needs a specialized capability (not just a tool), set `skill_gap` to a short phrase describing that capability. Otherwise omit it."* Mirrors the existing `new_tools` instruction verbatim in tone.
+- The new tool `request_skill_acquisition(capability_description: str)` is described to every agent in its tool list the same way `update_tasks` is, with instructions to use it "when you recognize mid-task that you need a distinct capability no current tool or skill provides."
 
-**C. Discovering a skill was insufficient (mid-task)**
-1. Task executes, evaluator runs as today.
-2. On `RETRY`, right before appending `feedback_msg` and looping back, call `agent_factory.refresh_tools(role, task_description)` (this already exists and is safe — expand-only). If it returns new `skill_names`, build a short `HumanMessage` announcing the newly-available skill's instructions (same injection pattern already used for `forced_cutoff` and `feedback_msg` — **not** a SystemMessage rebuild, since `task_messages` persists across retries and LangChain conversations don't re-read the system message mid-thread) and append it alongside the feedback message.
-3. This gives the SAME task a second attempt with a broadened toolkit/skillset — directly satisfies requirement #8, using machinery you already have (the RETRY loop), with one added call.
+### 4.2 How `vercel-labs/skills` is used for discovery
 
-**D. Discovering a *different* task/role is needed entirely**
-- Don't try to cram a second, unrelated skill into the same agent. If a task-level agent realizes mid-execution that the real fix is a separate specialized step (e.g. it's doing a "write report" task but realizes it first needs to "clean the data" — a genuinely different skill/role), it already has `update_tasks` — have it `insert_after_current` a new task with a distinct `agent_role`. That new task then goes through `create_agent()` fresh and gets its own 0–2 skill selection. This is cleaner than expanding one agent's skill budget indefinitely, and matches your "external planner, don't self-track" learning — the *plan* changes, not one agent's internal complexity.
+`skills find "<query>"` (non-interactive, query provided) — a real remote search against the skills.sh index, returns plain text: `owner/repo@skill_name`, install count, URL, one candidate per block. `SkillAcquisitionManager._search(query)` shells this out via `subprocess.run(["npx","skills","find",query], capture_output=True, timeout=SEARCH_TIMEOUT_SECONDS)` and parses the stdout with a small regex/line-scanner into a list of `Candidate(owner_repo, skill_name, installs, url)`.
+
+*Open item to verify before implementation:* whether your deployment has Node/`npx` available at all. If not, `skillsmd` (the Python port, `uvx skillsmd find "<query>"`) is a drop-in replacement with an identical command surface — confirm which one is actually installed in your runtime image before writing `_search`.
+
+### 4.3 How we identify the exact skill/repo to install
+
+Two-stage filter, mirroring what the `find-skills` meta-skill itself instructs an LLM agent to do — you're just doing it in code instead of relying on an external agent's judgment:
+1. **Hard gate (pure Python, no LLM):** drop candidates below an install-count floor (config, default e.g. 100) unless the source repo owner is on a small trusted allowlist (`vercel-labs`, `anthropics`, your own org). This matches the vetting rule the CLI's own docs describe.
+2. **Selection (one small LLM call, same pattern as `agent_creation_llm`):** if more than one candidate survives the gate, send the top N (e.g. 5) with their descriptions/URLs plus `capability_description` to the LLM and ask it to pick the single best match or return `"none"`. If only one candidate survives the gate, skip the LLM call — resolve directly.
+
+If nothing survives even the hard gate, `ensure_skill` returns `not_found` immediately — no install attempted, no LLM call wasted.
+
+### 4.4 How installation is started from the running agent
+
+`SkillAcquisitionManager._install(candidate) -> Path` shells out: `subprocess.run(["npx","skills","add", candidate.owner_repo, "--skill", candidate.skill_name, "-y", "--agent","generic"], cwd=PROJECT_ROOT, timeout=INSTALL_TIMEOUT_SECONDS, capture_output=True)`.
+
+*Open item, carried over and sharpened from v1:* the CLI's documented flags target `./<agent>/skills/` (or `~/<agent>/skills/` with `-g`) — there is no confirmed flag to point it at an arbitrary directory like your existing `github_skills/`. Before committing to this exact invocation, spike it once by hand and see where `--agent generic` actually lands the files. If it doesn't land where you need it, two fallbacks, both already anticipated in v1 §4: (a) install to its default location then move/symlink the folder into `github_skills/<skill_name>/` yourself, or (b) skip the CLI's `add` command entirely and hit the scoped download API (`https://skills.sh/api/download/{owner}/{repo}/{skill}`) directly, writing the response yourself into `github_skills/<skill_name>/` — this also sidesteps the whole-monorepo-download bug already flagged in v1 §14.
+
+### 4.5 Synchronous, asynchronous, or hybrid?
+
+**Hybrid, resolved simply: synchronous from the task's point of view, off the request thread underneath it.** Concretely:
+- From `_agent_executor_node`'s perspective (and the agent's), `ensure_skill()` is a plain blocking call — same as an LLM call or a tool execution already is. No `interrupt()`/resume, no separate async job queue.
+- Because your API layer already runs graph execution inside Starlette's threadpool (this is exactly why the ContextVar token-tracking approach broke, per your own prior findings), the subprocess call is *already* off the main event loop by construction. You get "doesn't block other users' requests" for free, without adding a task queue.
+- Net effect: one task's execution pauses for a few seconds while its own skill installs; other concurrent threads/tasks are unaffected. This is the same latency shape a slow LLM call already has, so it needs no new UX pattern beyond what streaming already surfaces (§5).
+
+A true async job-queue (Celery/RQ-style, with polling) would only be justified if installs commonly took tens of seconds to minutes. `npx skills add` copying a handful of markdown/script files is not that; don't build for a problem you don't have yet.
+
+### 4.6 How the agent waits for installation to finish
+
+It doesn't have to do anything special — `ensure_skill()` is a normal Python function call in the middle of `create_agent()`/`refresh_tools()`/the tool executor. The calling code (`_agent_executor_node` or `_tools_node`) simply doesn't proceed past that line until the function returns. "Waiting" is just the call stack, not a mechanism you build.
+
+### 4.7 How we detect installation completion
+
+Not by trusting the subprocess exit code alone (a `0` exit doesn't guarantee a well-formed package, and a non-zero exit with partial output is possible). Completion is detected by **re-verification against the filesystem** (§4.9) after the subprocess returns, regardless of exit code. Exit code is used only to short-circuit an obvious hard failure (nonzero + empty output) before even trying to verify.
+
+### 4.8 Handling errors, timeouts, partial/corrupted installs
+
+All failure modes funnel into the same `AcquisitionResult(status="failed", reason=...)` shape:
+- **Subprocess timeout** → kill the process, `status="failed", reason="install_timeout"`.
+- **Nonzero exit** → `status="failed", reason="install_error: <stderr excerpt>"`.
+- **Partial package** (dir created, `SKILL.md` missing or fails to parse, or frontmatter missing required `name`/`description`) → `status="failed", reason="incomplete_package"`. The partial directory is renamed with a `.partial-<timestamp>` suffix rather than left as a valid-looking `github_skills/<name>/` — this prevents a later call from mistaking it for a real, cached install (§4.16 depends on this).
+- **Oversized/scope-creep fetch** (v1 §14's "grabbed the whole monorepo" bug) → a file-count/size sanity check (e.g. reject if >200 files or >20MB for what should be one skill folder) runs as part of verification; over-limit is treated as `incomplete_package` too, not partially accepted.
+- **Retry policy:** try up to 2 ranked candidates (§4.3) before giving up. On final failure, `ensure_skill` returns `not_found`/`failed` — never raises — so the calling code always has a value to act on.
+- **What the agent does with a failure:** the manager's result is turned into ordinary message content. In the config-time path (§2A), `create_agent` just proceeds without that skill (same as if the LLM had returned `skills: []`) and the system prompt notes the gap so the agent doesn't silently pretend it has a capability it doesn't. In the tool-call path (§2B), the `ToolMessage` result literally says "Could not acquire a skill for X (reason). Continue with available tools, or ask the user for guidance if this capability is essential." — feeding the same evaluator/RETRY loop you already have; a real capability gap surfaces as a normal RETRY-with-feedback cycle, not a crash.
+
+### 4.9 Verifying the complete package before continuing
+
+`SkillAcquisitionManager._verify(path: Path) -> bool`, reusing `SkillDiscovery._parse_skill_md` as the parser:
+1. `SKILL.md` exists and parses; `name`/`description` frontmatter present.
+2. File-count/size sanity check (§4.8).
+3. For each of `references/`, `scripts/`, `assets/`, `templates/` that exists, just confirm it's a real directory (content isn't read at this stage — same "record paths, don't read content" principle as v1 §8).
+4. If the instructions text explicitly names a file (e.g. "run `scripts/build_report.py`") that isn't present in the recorded `scripts` list, log a warning but don't hard-fail — the agent will simply get a tool error later if it tries to run something that isn't there, same as any other missing-file case today.
+
+Only a package that passes step 1 gets registered at all (§4.10).
+
+### 4.10 How the newly installed skill becomes visible to `SkillDiscovery`/`SkillRegistry`
+
+New, small function in `skill_discovery.py`: `SkillDiscovery.index_single(skill_dir: Path, source: str = "github") -> Skill | None` — parses exactly one `SKILL.md` (the same parsing logic `index_root` already uses internally, factored out rather than duplicated) and calls `skill_registry.register()` for that one skill. This is what `ensure_skill` calls after `_verify` passes.
+
+### 4.11 Do we need to call `reindex_skills()` automatically?
+
+**No — and that's the point.** `reindex_skills()` walks every root and re-parses everything; calling it mid-task for one new folder is wasteful and adds latency proportional to your whole skill library, not to the one thing that changed. `index_single()` (§4.10) is the mid-task path. `POST /skills/reindex` and startup indexing remain exactly as they are for admin/bulk use (picking up anything installed by other means) — unchanged, still useful, just not on this hot path.
+
+### 4.12 How the running agent gets access without recreating the whole agent
+
+This is what `refresh_tools()` already does, unchanged: it's expand-only, and it edits `self.agents[role]` in place (`tool_names`/`skill_names` lists), not replacing the cached config. The only thing v2 adds is *when* it's called: right after `ensure_skill` reports `installed`, the calling code (either `create_agent` before first use, or the `request_skill_acquisition` tool handler) calls `agent_factory.refresh_tools(role, task_description)` so the now-registered skill gets picked up by the very next tool/prompt resolution — no new agent object, no lost `task_messages`.
+
+### 4.13 How the agent's prompt/tool configuration refreshes after a new skill appears
+
+This closes the gap v1 flagged and deferred (v1 §1: "the system prompt is only built once per task; a retry never rebuilds it"). v2 makes this mandatory, not optional, because it's now on the hot path every time acquisition succeeds mid-task:
+- After `refresh_tools` returns new `skill_names`, build the skill's `skill_directive()` text (same function as always) and inject it as a fresh `HumanMessage` appended to `task_messages` — the exact same injection pattern already used for `feedback_msg`/`forced_cutoff` in `_evaluator_node`. `task_messages` persists across the rest of the task, so this is enough; there's still no need to rebuild the original `SystemMessage`.
+- Tool binding is separate and already handled: `_apply_skills()` returns the skill's `tool_names`, which get unioned into `all_tool_names` the next time the agent is invoked — LangChain resolves the tool list per-invocation from the agent's bound tools, so a newly added tool is callable on the very next turn without any special-casing.
+
+### 4.14 Preventing race conditions with concurrent installs
+
+An in-process lock table keyed by normalized skill identifier (`owner_repo@skill_name`, or the capability query string before resolution): `_install_locks: dict[str, threading.Lock]`, guarded by one small meta-lock for dict mutation (classic double-checked-locking pattern). Two tasks wanting the *same* skill simultaneously: the second blocks on the same lock, and once it acquires the lock, it re-checks the registry first (§4.16) and finds the skill already there — no duplicate install, it just proceeds.
+
+Two tasks wanting *different* skills concurrently: different lock keys, no contention, both proceed in parallel — this is fine, they touch different directories.
+
+*Caveat to flag, not solve now:* this lock is process-local. If you ever scale to multiple backend worker processes, this needs a filesystem lock (a `.installing` marker file with a PID/timestamp, checked and cleaned up on failure) instead of an in-memory `threading.Lock`. Not needed at your current single-process scale — noted as a forward-looking limitation, matching how you've already flagged the SQLite connection-leak issue as a known, deferred-for-now item.
+
+### 4.15 Handling duplicate installation requests
+
+Same mechanism as §4.14 — "duplicate request" and "race condition" are the same problem from two different angles (concurrent vs. sequential-but-repeated). A duplicate request that arrives *after* a prior install already completed is just a normal cache hit (§4.16); a duplicate that arrives *while* one is in flight blocks on the lock and then also resolves to a cache hit once it wakes up.
+
+### 4.16 Reusing already-installed skills instead of re-downloading
+
+`ensure_skill()`'s very first step, before touching the lock or the network at all: check `skill_registry.get_skill(name)` (if the capability description already resolved to a known skill name in a prior call — see the negative/positive cache below) or check `github_skills/<candidate_name>/SKILL.md` existence directly on disk. Either hit short-circuits straight to `already_present`, skipping discovery, installation, and verification entirely. This is nearly free (dict lookup / single `Path.exists()`), so it's always run first, not just as an optimization for the common case.
+
+A small in-memory cache also maps `capability_description → resolved skill_name` (positive) and `capability_description → "not_found" (with timestamp)` (negative, short TTL e.g. 10 minutes) so that repeated *phrasings* of the same underlying need don't re-trigger a full search-and-rank cycle, and a recently-failed search doesn't get retried on every subsequent task in a short window.
 
 ---
 
-## 7. Required code changes (by file/function — no full implementations yet, per your instruction)
+## 5. Agent UX / execution state — is a formal state machine needed?
+
+**No.** The phases you sketched (`DISCOVERING_SKILL → INSTALLING_SKILL → WAITING_FOR_INSTALL → VERIFYING_SKILL → LOADING_SKILL → USING_SKILL → CONTINUE_TASK`) are real and worth naming, but they don't need to be a control-flow state machine with persisted transitions — they're already fully represented by:
+- **Control flow:** an ordinary sequential Python function (`ensure_skill`) with try/except around each phase. `WAITING_FOR_INSTALL` isn't a state at all in this model — it's just "the subprocess call hasn't returned yet," i.e., the calling frame is still on the stack (§4.6). There's nothing to persist or resume, because nothing crosses a request boundary.
+- **Visibility/UX:** each phase becomes a `_log(...)` call at the point it happens, using the same structured logging you already have (`_log`, `_log_block`). Tag them with a consistent event kind, e.g. `_log("SKILL-ACQUISITION", "Installing skill", skill=candidate.skill_name, phase="installing")`. Since your SSE layer already streams `_log`-driven plan/status/evaluation events into collapsible "Working" blocks in the frontend, these phase logs ride the exact same channel — no new streaming infrastructure, no new event schema beyond one more recognized "kind." This is what gives you the example UX transcript (*"Searching for a skill... Found a suitable skill. Installing it... Skill installed and verified..."*) essentially for free.
+
+Building a real persisted FSM would only be justified if installation needed to survive a process restart mid-flight, or if you wanted a user to be able to navigate away and come back mid-install across separate HTTP requests. Neither applies here — installs are seconds-scale and happen fully within one already-blocking node/tool call, same as an LLM turn does today. Treat the phase list as **event labels for tracing and streaming UX**, not as an execution model.
+
+Suggested phase labels for `_log` calls (for consistency, not enforcement): `searching`, `candidate_selected`, `installing`, `verifying`, `indexing`, `ready`, `failed`.
+
+---
+
+## 6. Skill resource-loading mechanism (extended from v1)
+
+Unchanged principle from v1 §8: **progressive disclosure, three levels** — name+description always visible, instructions spliced on selection, resource *paths* (not content) appended as a manifest. v2 adds one recognized subfolder and reaffirms that a live-acquired skill goes through the identical path as a pre-existing one — acquisition just makes the folder exist; everything downstream is unchanged v1 machinery.
+
+| Subfolder | When the agent uses it | Mechanism |
+|---|---|---|
+| `SKILL.md` | Always — defines how to approach the task | Instructions spliced into system prompt via `skill_directive()`, unchanged |
+| `references/*.md` | When it needs domain knowledge it doesn't already have | `read_skill_resource(skill_name, relative_path)` — new tool, confined to `skill.path`, reads on demand |
+| `scripts/*` | When the skill's own instructions say to automate something | Existing `run_shell_command(command=..., cwd=skill.path)` — no new tool |
+| `assets/*` | Templates/boilerplate the output should be based on | `read_skill_resource` to pull content; agent's existing `write_file` (already workdir-confined) to place a working copy where needed |
+| `templates/*` *(new in v2)* | Same treatment as `assets/` — kept as a separate recognized name because skill authors commonly distinguish "reusable boilerplate to copy" (`templates/`) from "reference material to read" (`assets/`) | `read_skill_resource`, same confinement rules |
+
+The manifest line format stays `path — one-line purpose`, generated from the `Skill.references`/`scripts`/`assets`/`templates` lists (all four now first-class fields on `Skill`, populated at parse time by `_parse_skill_md`/`index_single`, content never read until requested).
+
+**Deciding when to read vs. execute** is left to the skill author's own instructions in `SKILL.md` — that's the whole point of the manifest-plus-on-demand-tool design: your orchestrator doesn't need any new judgment logic here, because the skill's own text already tells the agent "read `references/x.md` if you need Y" or "run `scripts/build.py` to do Z." This was already true in v1 and doesn't change.
+
+---
+
+## 7. Multi-skill handling (extended from v1, now live)
+
+v1's rule ("don't cram two skills into one agent, split into a new task with `update_tasks` instead") still applies for genuinely *different* work. But your example — realizing mid-execution that the *same* task also needs a second capability, not a second task — is now directly served by §2B: the agent just calls `request_skill_acquisition` again, from wherever it is in its own tool-use loop.
+
+```
+Task: "Create PDF report"
+  agent role: report_writer, skill: pdf-generation (acquired at create_agent time, §2A)
+  │
+  ▼
+Agent starts writing content, realizes it also needs chart-image generation
+  │
+  ▼
+Agent calls request_skill_acquisition("generate charts from tabular data")
+  │  → runs the SAME ensure_skill() pipeline (§3), returns as a ToolMessage
+  │  → on success, refresh_tools() unions the new skill in (§4.12), directive
+  │    injected as a HumanMessage (§4.13)
+  ▼
+Agent continues the SAME task, task_messages unbroken, now has both skills
+```
+
+No new task, no new agent, no lost context — `task_messages` just accumulates one more `ToolMessage` + one more `HumanMessage`, exactly like any other mid-task tool call already does. This is strictly additive to v1's task-splitting guidance, not a replacement for it: use `update_tasks` when the *role* itself is wrong for the remaining work (e.g. "I'm a writer but this needs data cleaning first"); use `request_skill_acquisition` when the *role* is still right but it's missing one more capability (e.g. "I'm a report writer and I still am, I just also need chart rendering").
+
+`refresh_tools`'s existing union-not-replace behavior (v1 §9) still applies unchanged — skills accumulate on a role across the task's lifetime, never silently dropped.
+
+---
+
+## 8. Required code changes (by file)
 
 **`skills.py`**
-- Add to `Skill`: `references: list[str] = field(default_factory=list)`, `scripts: list[str] = field(default_factory=list)`, `assets: list[str] = field(default_factory=list)` — each a list of paths *relative to `skill.path`*, not content.
-- No changes to `SkillRegistry`.
+- `Skill`: add `templates: list[str] = field(default_factory=list)` alongside v1's `references`/`scripts`/`assets`.
 
 **`skill_discovery.py`**
-- `_parse_skill_md`: after building the `Skill`, list the sibling `references/`, `scripts/`, `assets/` subfolders (if present) under `skill_md.parent` and populate the three new fields with relative filenames. Don't read file contents at index time — keeps `skills_index.json` small and discovery cheap.
-- New (optional, separate module `skill_sync.py` is cleaner than bloating this file): `sync_skill_from_repo(owner_repo: str, skill_name: str | None, target_root: Path = Path("github_skills")) -> Path` — shells out to the CLI or hits the download API, lands the package under `github_skills/`, returns the path. Idempotent: skip the fetch if `github_skills/<skill_name>/SKILL.md` already exists, unless a `force=True` refresh is requested.
+- Factor the SKILL.md-parsing body of `index_root` into a reusable `_parse_skill_md(path) -> Skill | None` if not already fully isolated (v1 already assumed this existed for extension — confirm it's callable standalone).
+- New: `index_single(skill_dir: Path, source: str = "github") -> Skill | None` — parses one folder, registers it, returns the `Skill` or `None` on parse failure. This is the function `ensure_skill` calls post-verification.
+
+**New file `skill_acquisition.py`**
+- `class SkillAcquisitionManager`:
+  - `ensure_skill(capability_description, task_description) -> AcquisitionResult` — the orchestrating function, §2–§4.
+  - `_check_cache_and_registry(...)` — §4.16.
+  - `_search(query) -> list[Candidate]` — §4.2, shells `skills find`.
+  - `_rank_and_gate(candidates, task_description) -> Candidate | None` — §4.3.
+  - `_install(candidate) -> Path` — §4.4/4.5, shells `skills add`.
+  - `_verify(path) -> bool` — §4.9.
+  - `_get_lock(key) -> threading.Lock` — §4.14.
+  - Small in-memory positive/negative cache — §4.16.
 
 **`dynamic_langgraph_backend.py`**
-- `DynamicAgentFactory.skill_directive()`: after the existing instructions block, append a one-line-per-file manifest built from `skill.references`/`skill.scripts`/`skill.assets` (filenames only — keep it short; this is the "level 3 pointer", not the content).
-- `DynamicAgentFactory.get_or_create()`: uncomment/re-enable the `refresh_tools` call for the cached-role branch.
-- New tool factory on `DynamicToolRegistry` (or a small standalone function registered the same way `_read_file_tool` etc. are): `_read_skill_resource_tool()` → `read_skill_resource(skill_name: str, relative_path: str) -> dict`. Confinement logic mirrors `path_utils`' workdir confinement, just rooted at `skill_registry.get_skill(skill_name).path` instead of the thread's workdir — resolve, verify it stays inside that skill's own folder, reject `..` traversal, reject anything not in `references/`/`scripts/`/`assets/`.
-- `_evaluator_node`: in the `RETRY` branch, call `refresh_tools` before constructing `feedback_msg`; if `skill_names` grew, append a second `HumanMessage` carrying the new skill's directive text (via `skill_directive()`) so it reaches the LLM without needing a SystemMessage rebuild.
-- `main.py`: one new endpoint, `POST /skills/sync`, body `{owner_repo, skill_name}`, calls the new `sync_skill_from_repo` then `reindex_skills()` — mirrors the existing `/skills/reindex` endpoint pattern exactly.
-- `index.html`: optional — add a "Sync from GitHub" input next to the existing "Reindex" button in the Skills modal. Not required for the architecture to work; purely a convenience.
+- `DynamicAgentFactory.create_agent()` / `refresh_tools()`: add `"skill_gap"` to the expected JSON shape and its prompt instructions (sibling to `new_tools`); when present, call `SkillAcquisitionManager.ensure_skill(...)` before finalizing `_apply_skills()`.
+- New tool factory (alongside `_read_file_tool`, `_create_missing_tools`, etc.): `_request_skill_acquisition_tool()` → wraps `ensure_skill`, registered as an always-available tool the same way `update_tasks` is bound in `create_agent`/`refresh_tools`'s `all_tool_names`.
+- New tool factory: `_read_skill_resource_tool()` → `read_skill_resource(skill_name, relative_path)`, confined to `skill_registry.get_skill(skill_name).path`, covering `references/`, `scripts/`, `assets/`, `templates/`.
+- `DynamicAgentFactory.skill_directive()`: append the four-folder resource manifest (v1 §7, now including `templates`).
+- `_evaluator_node` RETRY branch: unchanged mechanism, prompt wording updated to mention `request_skill_acquisition` as an available option when feedback indicates a missing capability rather than a wrong approach.
+- Structured `_log` calls at each acquisition phase (§5) — no new logging infrastructure, just consistent tagging (`kind="SKILL-ACQUISITION"`, `phase=...`).
 
-That's the complete file list: **`skills.py`, `skill_discovery.py`, `dynamic_langgraph_backend.py`, `main.py`**, optionally `index.html`. No new top-level modules besides the small `skill_sync.py`, and even that could just live as functions inside `skill_discovery.py` if you'd rather not add a file.
+**`main.py`** *(not in this snapshot — describe the touch point)*
+- No new endpoint required for the live path (that's the point — it's no longer an admin action). `POST /skills/sync` and `POST /skills/reindex` remain, unchanged, for bulk/admin use only.
+- If your SSE layer filters `_log` events by kind before forwarding to the frontend, add `"SKILL-ACQUISITION"` to the forwarded set so the phase events actually reach the "Working" disclosure blocks — verify against however that filter is currently implemented.
 
----
-
-## 8. Skill package/resource handling design
-
-- **`SKILL.md`** — parsed as today, unchanged.
-- **`references/*.md`** — path recorded at discovery, content read on demand only, via `read_skill_resource`. Rationale: reference docs can be large; pre-loading all of them into every task's system prompt defeats the point of "progressive disclosure" and burns context on your free-tier models unnecessarily.
-- **`scripts/*`** — path recorded, **never read into context** — executed via `run_shell_command(cwd=skill.path)` per the skill's own instructions. This is the cheapest possible integration: zero new execution machinery.
-- **`assets/*`** (templates, images, boilerplate files) — path recorded; exposed the same way as references (readable via `read_skill_resource`) or, if a task needs to *copy* an asset into the working directory, that's just `read_file`... no — `read_skill_resource` to get content, then the agent's own `write_file` (already confined to workdir) to place it where needed. No new tool required for that either.
-- **Unsupported for now, explicitly**: nested nested subfolders inside `references/`/`scripts/`/`assets/`, and root-level `SKILL.md` layouts (matches the limitation already flagged in the Phase 2 discussion). Call this out as a known gap, not silently.
+**`index.html`** — no required change. The v1-proposed "Sync from GitHub" manual button is now optional/secondary (still useful for pre-warming the cache with skills you know you'll need), not part of the critical path.
 
 ---
 
-## 9. Dynamic multi-skill selection strategy
+## 9. Testing plan (extends v1 §12, live-path scenarios)
 
-- Keep the existing prompt rule as the primary lever: **0–2 skills per agent role, selected only on genuine description match** — this cap already exists in your `create_agent`/`refresh_tools` prompts and is doing real work preventing over-selection.
-- If a task plausibly needs 3+ skills, treat that as a signal the **planner under-decomposed the task**, not a reason to raise the cap. The fix is `update_tasks` splitting it into multiple role-scoped tasks (§6D), each with its own tight 0–2 skill budget. This keeps per-agent context small and keeps skill selection legible/debuggable (you can look at `GET /agents` and see exactly which skill went with which role).
-- `refresh_tools` already unions with previously-applied skills (`set(agent_conf.get("skill_names", [])) | set(applied_skill_names)`) rather than replacing — so a role naturally accumulates skills across retries/tasks without ever losing one, which is the right default (never surprise-remove a working capability).
-
----
-
-## 10. How the agent decides when to search for/install another skill
-
-Two distinct triggers, don't conflate them:
-
-1. **"This exact task needs more" (same task, same role)** — driven by the evaluator's `RETRY` verdict (§6C). Fully automatic, no agent self-judgment required — this is exactly the kind of externally-driven signal your own "weaker models need external structure" principle favors over asking the agent to introspect "do I need a new skill?"
-2. **"A different kind of work is needed" (new task, possibly new role)** — driven by the agent's own `update_tasks` call, which already exists for exactly this purpose (inserting/editing upcoming plan steps). No new decision-making logic needed here either — just make sure the agent's system prompt (or a shared instruction fragment) mentions that inserting a task with a more specific `agent_role` is the right move when it recognizes it's missing a distinct capability, not just a missing tool.
-
-Neither path requires the agent to know about `vercel-labs/skills`, GitHub, or installation at all — that layer is invisible to it. It only ever sees "Available skills: {name: description}", same as today.
+1. **Cold-start acquisition:** ask for a task with zero matching local skills, whose need clearly maps to a real, well-known public skill (e.g. a PDF/report skill). Confirm: `skill_gap` fires → `ensure_skill` runs all phases → `GET /agents` shows the skill attached → the task actually completes using it.
+2. **Cache-hit path:** run the same request twice in a row (two separate task threads). Confirm the second run short-circuits at §4.16 — no second subprocess call (check logs/timestamps), same as v1's idempotent-sync test but now triggered live.
+3. **Concurrent identical requests:** fire two tasks needing the same missing skill at the same time. Confirm only one install subprocess runs (lock behavior, §4.14) and both tasks end up with the skill attached.
+4. **Mid-task self-service (multi-skill):** engineer a task where the agent's first skill is genuinely insufficient partway through; confirm it calls `request_skill_acquisition`, the second skill gets attached without a new task/agent, and `task_messages` shows the injected directive (§4.13) actually reaching the LLM.
+5. **No-match search:** a capability with no reasonable public skill available. Confirm `not_found` is returned cleanly, the agent proceeds without crashing, and the negative cache prevents repeat searches within its TTL.
+6. **Install failure — timeout:** simulate a hung subprocess (mock or artificially low timeout). Confirm graceful `failed` result, no partial `github_skills/<name>/` left in a state that a later `already_present` check would wrongly accept.
+7. **Install failure — malformed package:** hand-craft a "skill" with a missing/broken `SKILL.md` at the expected path (simulate a bad install). Confirm `_verify` rejects it, it's quarantined (`.partial-*`), and it never reaches `SkillRegistry`.
+8. **Oversized fetch:** simulate an install that dumps far more files than a single skill should have. Confirm the sanity check in `_verify` rejects it.
+9. **Resource pull-through and script execution:** same as v1 §12.3/12.4, now exercised against a *live-acquired* skill rather than a hand-copied one — confirms the acquisition path produces something structurally identical to a pre-seeded one.
+10. **Regression:** v1's Phase 1–3 test suite (precedence, malformed-JSON bundled tools, untrusted-skill gating) still passes unchanged for pre-seeded skills that never go through `ensure_skill` at all.
 
 ---
 
-## 11. Caching/reuse strategy
+## 10. Phased implementation plan
 
-- **On disk (persistent, restart-safe):** `github_skills/<name>/` — `sync_skill_from_repo` checks for existence before fetching, so a skill is only ever downloaded once unless explicitly forced.
-- **Registry (persistent, restart-safe):** `SkillRegistry`'s existing `DB/skills_index.json` write-through — unchanged, already handles this.
-- **In-memory (process lifetime only):** `DynamicAgentFactory.agents` cache — a role's resolved tool/skill set persists for the life of the process once created; `refresh_tools` only *adds*, never *re-fetches* from disk. This is already correct and needs no change.
-- **What's genuinely new to cache-manage:** nothing — the resource-manifest approach (§8) means you're never caching file *content* in memory beyond what `read_skill_resource` returns for that one call, so there's no new cache invalidation problem to design for.
+**Phase A — Manager skeleton + manual trigger (no CLI yet)**
+Build `SkillAcquisitionManager` with `_search`/`_install` stubbed to operate on a hand-placed folder (simulate acquisition), so `_verify`, `index_single`, cache, and locking can be tested in isolation before the CLI is in the loop at all.
 
----
+**Phase B — Real `skills find` / `skills add` integration**
+Wire the real subprocess calls. Spike the CLI's actual output directory behavior first (§4.4's open item) before finalizing `_install`. Confirm end-to-end against one real, well-known public skill.
 
-## 12. Testing plan — concrete scenarios
+**Phase C — Config-time trigger (`skill_gap` in `create_agent`/`refresh_tools`)**
+Wire §2A. Test scenario 1 (§9).
 
-1. **Format compatibility smoke test:** hand-copy one real skill folder from `vercel-labs/agent-skills` (e.g. `frontend-design`, including its `references/` if any) into `github_skills/frontend-design/`, hit `/skills/reindex`, confirm `GET /skills` shows it with correct `references`/`scripts`/`assets` lists populated.
-2. **Selection test:** ask a task that clearly matches that skill's description; confirm via `GET /agents` that `skills` includes it and `tools` includes anything it declared.
-3. **Resource pull-through test:** confirm the agent, when it needs something from `references/`, actually calls `read_skill_resource` rather than hallucinating content — check the trace/logs for the tool call.
-4. **Script execution test:** a skill whose instructions say "run scripts/x.py via run_shell_command" — confirm the tool call happens with the correct `cwd`.
-5. **Confinement test:** call `read_skill_resource` with a `relative_path` like `../../etc/passwd` or an absolute path — confirm it's rejected, mirroring the symlink-escape test already written for `SkillDiscovery`.
-6. **Mid-task augmentation test:** engineer a task that fails its first attempt for a reason a second skill would fix (two skills registered, only the wrong one auto-selected initially); confirm the evaluator's RETRY path calls `refresh_tools`, the second skill gets added, and the injected `HumanMessage` actually reaches the LLM (check `task_messages` in the trace).
-7. **Task-split test:** a task genuinely needing two unrelated skills — confirm the agent (or you, manually, if the model doesn't self-trigger this reliably) uses `update_tasks` to split it, and each resulting task gets its own clean 0–2 skill selection rather than one bloated role.
-8. **Idempotent sync test:** call `/skills/sync` twice for the same skill — confirm the second call doesn't re-fetch (check logs/timestamps on the folder).
-9. **Regression test:** run your existing Phase 1–3 test suite (precedence, malformed-JSON bundled_tools, untrusted-skill gating) unchanged — none of this should behave differently for skills that don't declare `references/scripts/assets`.
+**Phase D — Self-service tool (`request_skill_acquisition`)**
+Wire §2B, the tool, and the `refresh_tools` + directive-injection follow-through (§4.12/4.13). Test scenario 4.
 
----
+**Phase E — Resource loading extension**
+`read_skill_resource` tool + `templates/` support (§6), reusing v1 Phase 5a/5b design essentially unchanged, now exercised against live-acquired skills.
 
-## 13. Phased implementation plan (simplest working version first)
+**Phase F — Failure modes, locking, caching hardening**
+Scenarios 3, 5, 6, 7, 8 from §9. This is where most of the actual robustness work lives — get the happy path working end-to-end first (A–E), then harden.
 
-**Phase 5a — Resource awareness (read-only, no execution change)**
-- Extend `Skill` with `references`/`scripts`/`assets`.
-- Extend `SkillDiscovery._parse_skill_md` to populate them.
-- Extend `skill_directive()` to append the manifest.
-- No new tools yet. Test: manifest shows up correctly in a spliced system prompt for a hand-crafted multi-file skill folder.
+**Phase G — Streaming/UX polish**
+Add the `_log` phase tags (§5) and confirm they surface in the existing "Working" disclosure blocks. Purely additive, doesn't gate correctness of anything above.
 
-**Phase 5b — On-demand resource reading**
-- Add `read_skill_resource` tool + confinement.
-- Test: agent successfully pulls a `references/*.md` file it was told about but not shown.
-
-**Phase 5c — Re-enable adaptive refresh**
-- Un-comment `refresh_tools` in `get_or_create`.
-- Wire `refresh_tools` into the evaluator's `RETRY` branch + the follow-up `HumanMessage` injection.
-- Test: mid-task skill augmentation scenario (§12.6).
-
-**Phase 5d — GitHub sync utility**
-- `sync_skill_from_repo` (shell-out or download API), `/skills/sync` endpoint.
-- Test: idempotent sync test (§12.8), full pipeline against a real `vercel-labs/agent-skills` entry.
-
-**Phase 5e — Multi-skill task-splitting guidance**
-- Add a short shared instruction fragment (in the base system prompt template, not a new mechanism) nudging agents to use `update_tasks` when they recognize a distinct-capability need, rather than asking for more skills on themselves.
-- Test: task-split scenario (§12.7).
-
-This ordering means you have something demoable after 5a+5b alone (skills with real reference material, working end-to-end) before touching the retry-loop or sync-automation pieces, which are individually higher-risk changes to a graph that's already carrying real production behavior (retry/evaluator logic).
+This ordering gets you a genuinely live, end-to-end demoable pipeline (Phases A–D) before touching failure-mode hardening or UX polish — consistent with your own stated preference for phased, sequentially-confirmed delivery.
 
 ---
 
-## 14. Potential problems / tradeoffs
+## 11. Deferred / carried-forward from v1
 
-- **Re-enabling `refresh_tools` in `get_or_create` adds one LLM call per task for any role that's reused**, even when nothing new is needed (it already returns early if nothing changed, but it still costs a call to find that out). On a free-tier Bedrock model this is a real, measurable cost increase — worth watching in your token-usage logs after 5c ships. If it's too expensive, a cheaper middle ground is: only call `refresh_tools` when the evaluator actually issues a RETRY (skip it on cache-hit-and-first-attempt-succeeds paths), i.e. do 6C but not step B.4 in §6.
-- **`npx skills add` requires Node.js/npm available in your runtime environment.** If your deployment target is Python-only (no Node), you'd need the download-API fallback exclusively — confirm this before committing to the CLI path.
-- **Trust deferred, not removed, has a real consequence:** with `github`-sourced skills defaulted to `trust="trusted"` for this phase (per your instruction), their `bundled_tool_specs` (if any) WILL get auto-created and sandboxed-executed the same as your own generated tools. That's a deliberate, temporary widening of your attack surface — fine for now per your explicit scope decision, but flag it clearly (e.g. a log line or a README note) so it isn't forgotten before this goes anywhere production-facing.
-- **Skill-authored `scripts/` running via `run_shell_command`** aren't sandboxed the way your auto-created *tools* are (those go through `ToolSandboxExecutor`/smoke-testing). A skill's `scripts/foo.py` runs with whatever `run_shell_command` already allows. This is a second, separate trust gap from the tool one above — same "acceptable for now, must revisit" category.
-- **Context bloat is still possible even with manifests-only.** If a role accumulates several skills over a long-running thread (via the union-not-replace behavior in `refresh_tools`), the system prompt grows monotonically for that role's lifetime. Worth a simple cap later (e.g. don't add a skill if the role already has N), but not needed for the initial version.
-- **The download-API scoping bug you found in the vercel-labs issue tracker** is a live reminder not to trust "it only grabbed the skill folder" blindly — a basic file-count/size sanity check on whatever `sync_skill_from_repo` pulls down (reject/warn if a "single skill" fetch returns hundreds of files) is cheap insurance worth including even in the "don't worry about trust yet" phase, since it's a correctness issue, not a security one.
+- **Trust/security:** unchanged decision from v1 §14 — live-acquired skills default to `trust="trusted"` for this phase, same as v1's synced skills did, with the same explicit acknowledgment that this is a deliberate, temporary widening of attack surface now that it's *fully automatic* rather than admin-reviewed. Flag this more prominently than v1 did, precisely because a human is no longer in the loop before code from an arbitrary GitHub repo gets executed — revisit before anything production-facing.
+- **Multi-process lock upgrade** (§4.14 caveat) — filesystem-based lock instead of in-memory, only needed if you scale beyond one backend worker process.
+- **Node/`npx` vs. `skillsmd` decision** (§4.2) — confirm which is actually available in your runtime before writing `_search`/`_install`.
+- **Exact CLI target-directory behavior** (§4.4) — spike before finalizing, may require the download-API fallback instead of `skills add` directly.
