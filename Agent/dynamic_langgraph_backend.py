@@ -208,6 +208,14 @@ TOOL_CALL_LIMIT_OVERRIDES = {
 MUTATING_TOOL_NAMES = {"run_shell_command", "write_file", "generate_document", "create_artifact"}
 MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
 MAX_LIST_ENTRIES = 500
+# Any dict-valued tool result field longer than this (e.g. a base64 image
+# blob) gets stripped out of what's persisted into ToolMessage/task_messages
+# history -- history is resent to the LLM on EVERY subsequent turn of the
+# task, so an unstripped 30-45k char base64 string here costs ~8-12k tokens
+# PER TURN, PER PRIOR CHART, and compounds fast (see generate_chart bug,
+# SKILL-DEBUG log tag "TOOL-DEBUG"). 2000 chars is generous headroom for any
+# legitimate short field while still catching base64 image/binary payloads.
+MAX_TOOL_RESULT_FIELD_CHARS = 2_000
 SHELL_TIMEOUT = 60  # default seconds before run_shell_command kills the process
 SHELL_TIMEOUT_CAP = 300  # hard ceiling regardless of what the caller requests
 MAX_SHELL_OUTPUT_CHARS = 20_000  # cap for stdout/stderr each, same reasoning as MAX_READ_CHARS
@@ -239,6 +247,61 @@ def _extract_image_blocks(content) -> list[dict]:
     if isinstance(content, list):
         return [b for b in content if isinstance(b, dict) and b.get("type") == "image_url"]
     return []
+
+
+def _guess_mime_from_path(path: str) -> str:
+    """Best-effort mime type from a file extension, for image payloads that
+    arrive without an explicit mime_type (e.g. generate_chart's result)."""
+    ext = (path or "").rsplit(".", 1)[-1].lower() if "." in (path or "") else ""
+    return {
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+    }.get(ext, "image/png")
+
+
+# Field-name conventions seen across different tools for "here's a base64
+# image blob" -- checked in order, first match wins. Kept separate from the
+# explicit "is_image" contract (used by view_image) so tools that don't
+# opt in (e.g. generate_chart, which returns {"file_path":..., "base64_image":...}
+# with no "is_image" key) still get routed through the one-turn image path
+# instead of falling through to str(result) and permanently bloating
+# task_messages history with a 25-45k char base64 string on every call.
+_IMAGE_B64_FIELD_CANDIDATES = ("base64_image", "data_b64", "image_base64", "base64")
+
+
+def _extract_unflagged_image(result: dict) -> tuple[str, str, str] | None:
+    """If `result` looks like an image payload that didn't set the explicit
+    is_image contract, return (b64_data, mime_type, path_hint); else None."""
+    if not isinstance(result, dict) or result.get("is_image"):
+        return None
+    for key in _IMAGE_B64_FIELD_CANDIDATES:
+        value = result.get(key)
+        if isinstance(value, str) and len(value) > 200:
+            mime = result.get("mime_type") or _guess_mime_from_path(result.get("file_path") or result.get("path") or "")
+            path_hint = result.get("file_path") or result.get("path") or "(no path given)"
+            return value, mime, path_hint
+    return None
+
+
+def _sanitize_tool_result_for_history(result, max_field_chars: int = MAX_TOOL_RESULT_FIELD_CHARS):
+    """Return (sanitized_result, elided_field_names). Any dict-valued string
+    field longer than max_field_chars is replaced with a short placeholder
+    before the result is turned into permanent ToolMessage/task_messages
+    history -- that history is resent to the LLM on EVERY subsequent turn of
+    the task, so an un-stripped base64 blob here costs thousands of tokens
+    PER TURN, PER PRIOR TOOL CALL, and is what actually blows the context
+    window on multi-chart tasks (see generate_chart's TOOL-DEBUG log).
+    Non-dict results and dicts with no oversized field pass through
+    unchanged."""
+    if not isinstance(result, dict):
+        return result, []
+    elided = []
+    sanitized = dict(result)
+    for key, value in result.items():
+        if isinstance(value, str) and len(value) > max_field_chars:
+            sanitized[key] = f"<elided {len(value)} chars, not kept in conversation history -- see 'file_path'/'path' if present>"
+            elided.append(key)
+    return sanitized, elided
 
 
 def parse_json_safely(text: str, default=None):
@@ -1728,6 +1791,19 @@ class DynamicAgentManager:
             index_results=index_results, total_skills=len(self.skill_registry.skills),
             known_skills=list(self.skill_registry.skills.keys()),
         )
+        stale_skills = [
+            s.name for s in self.skill_registry.skills.values()
+            if s.path and not Path(s.path).is_dir()
+        ]
+        if stale_skills:
+            _log(
+                "WARNING", "Persisted skill(s) have no matching folder on disk -- likely orphaned entries from "
+                "DB/skills_index.json that _load_persisted() loaded directly, bypassing register_skill()'s "
+                "precedence/existence checks. These are still being advertised to the selection LLM and will "
+                "fail if selected (read_skill_resource / tool binding will error on a missing path). Remove them "
+                "from the persisted skills_index.json or re-run reindex_skills() after restoring their folder.",
+                stale_skills=stale_skills,
+            )
         """Phase 2: scan skills/, github_skills/, community_skills/, and
         project_skills/ once at startup. self.reindex_skills() re-runs
         this on demand (e.g. after dropping in a new SKILL.md without
@@ -2160,6 +2236,13 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 result = f"Error executing tool '{tool_name}': {e}"
                 _log("ERROR", "Tool invocation raised an exception", tool=tool_name, task_id=task["id"], error=str(e))
 
+            unflagged_image = _extract_unflagged_image(result)
+            if unflagged_image is not None:
+                _log(
+                    "TOOL-DEBUG", "Detected unflagged image payload in tool result; routing through one-turn image path instead of raw text history",
+                    tool=tool_name, task_id=task["id"], field_bytes=len(unflagged_image[0]), mime=unflagged_image[1], path=unflagged_image[2],
+                )
+
             if isinstance(result, dict) and result.get("is_image"):
                 # ToolMessage content must stay a plain string (OpenAI's API
                 # doesn't accept image content there) -- so the ToolMessage
@@ -2171,8 +2254,21 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 )
                 summary = f"Loaded image '{result.get('path')}' ({result['mime_type']}); it is now attached for you to view."
                 tool_messages.append(ToolMessage(content=summary, tool_call_id=call["id"], name=tool_name))
+            elif unflagged_image is not None:
+                b64_data, mime, path_hint = unflagged_image
+                pending_images.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_data}"}}
+                )
+                summary = f"Generated image '{path_hint}' ({mime}); it is now attached for you to view. Full image data is not kept in task history -- reference the file path if you need it again."
+                tool_messages.append(ToolMessage(content=summary, tool_call_id=call["id"], name=tool_name))
             else:
-                tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"], name=tool_name))
+                sanitized_result, elided_fields = _sanitize_tool_result_for_history(result)
+                if elided_fields:
+                    _log(
+                        "TOOL-DEBUG", "Elided oversized field(s) from tool result before storing in task history",
+                        tool=tool_name, task_id=task["id"], fields=elided_fields,
+                    )
+                tool_messages.append(ToolMessage(content=str(sanitized_result), tool_call_id=call["id"], name=tool_name))
 
         updated_task_messages = state["task_messages"] + tool_messages
         extra_messages = list(tool_messages)
