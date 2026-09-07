@@ -173,6 +173,11 @@ class SkillAcquisitionManager:
         request_skill_acquisition tool handler) always have a value to act
         on (plan §4.8)."""
         key = self._normalize(capability_description)
+        _log(
+            "SKILL-DEBUG", "ensure_skill called",
+            capability=capability_description, task=task_description, cache_key=key,
+            positive_cache_size=len(self._positive_cache), negative_cache_size=len(self._negative_cache),
+        )
 
         cached = self._check_cache_and_registry(key)
         if cached is not None:
@@ -207,6 +212,12 @@ class SkillAcquisitionManager:
             _log("ERROR", "Skill search failed", capability=capability_description, error=str(e), phase="failed")
             candidates = []
 
+        _log(
+            "SKILL-DEBUG", "Raw candidates before gating",
+            capability=capability_description, count=len(candidates),
+            candidates=[{"owner_repo": c.owner_repo, "skill_name": c.skill_name, "installs": c.installs, "url": c.url} for c in candidates],
+        )
+
         gated = self._rank_and_gate(candidates, task_description)
         if not gated:
             self._negative_cache[key] = time.time()
@@ -214,7 +225,24 @@ class SkillAcquisitionManager:
                 "SKILL-ACQUISITION", "No candidate passed the quality gate; nothing installed",
                 capability=capability_description, candidates_found=len(candidates), phase="failed",
             )
+            if candidates:
+                _log(
+                    "SKILL-DEBUG", "All candidates were gated out -- check installs vs INSTALL_COUNT_FLOOR and TRUSTED_OWNER_ALLOWLIST",
+                    install_count_floor=INSTALL_COUNT_FLOOR, trusted_owners=sorted(TRUSTED_OWNER_ALLOWLIST),
+                    rejected=[{"owner_repo": c.owner_repo, "skill_name": c.skill_name, "installs": c.installs} for c in candidates],
+                )
+            else:
+                _log(
+                    "SKILL-DEBUG", "Zero candidates found at all -- check whether npx/uvx CLI is on PATH and staging_root is empty",
+                    staging_root=str(self.staging_root), staging_root_exists=self.staging_root.is_dir(),
+                )
             return AcquisitionResult(status="not_found", skill_name=None, reason="no candidate passed the quality gate")
+
+        _log(
+            "SKILL-DEBUG", "Candidates after gating (best first)",
+            capability=capability_description,
+            gated=[{"owner_repo": c.owner_repo, "skill_name": c.skill_name, "installs": c.installs} for c in gated],
+        )
 
         last_reason = "no candidates attempted"
         for candidate in gated[:MAX_INSTALL_ATTEMPTS]:
@@ -313,29 +341,45 @@ class SkillAcquisitionManager:
         alongside real hits -- see module docstring for why that path is
         kept rather than removed."""
         candidates: list[Candidate] = list(self._search_staging(capability_description))
+        _log("SKILL-DEBUG", "Staging search complete", capability=capability_description, staging_candidates=len(candidates))
 
         for cmd_prefix in SKILLS_FIND_CMD_CANDIDATES:
+            _log("SKILL-DEBUG", "Attempting skills-find CLI", cmd=cmd_prefix, capability=capability_description)
             try:
                 proc = subprocess.run(
                     [*cmd_prefix, capability_description],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=SEARCH_TIMEOUT_SECONDS,
+                    capture_output=True, text=True, timeout=SEARCH_TIMEOUT_SECONDS,
                 )
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                _log("SKILL-DEBUG", "CLI binary not found on PATH; trying next candidate", cmd=cmd_prefix[0], error=str(e))
                 continue  # this CLI isn't installed in this runtime; try the next one
             except subprocess.TimeoutExpired:
-                _log("WARNING", "skills find timed out", cmd=cmd_prefix[0], capability=capability_description)
+                _log("WARNING", "skills find timed out", cmd=cmd_prefix[0], capability=capability_description, timeout_seconds=SEARCH_TIMEOUT_SECONDS)
                 return candidates
+            _log(
+                "SKILL-DEBUG", "skills-find CLI returned",
+                cmd=cmd_prefix, exit_code=proc.returncode,
+                stdout_preview=proc.stdout[:500], stderr_preview=proc.stderr[:500],
+            )
             if proc.returncode != 0 and not proc.stdout.strip():
                 _log(
                     "WARNING", "skills find exited non-zero with no output",
                     cmd=cmd_prefix[0], exit_code=proc.returncode, stderr=proc.stderr[:300],
                 )
                 continue
-            candidates.extend(self._parse_find_output(proc.stdout))
+            parsed = self._parse_find_output(proc.stdout)
+            _log("SKILL-DEBUG", "Parsed candidates from CLI output", cmd=cmd_prefix, parsed_count=len(parsed))
+            if proc.stdout.strip() and not parsed:
+                _log(
+                    "WARNING", "skills find produced output but zero candidates parsed -- CLI output format may not match _CANDIDATE_HEADER_RE",
+                    cmd=cmd_prefix[0], stdout_preview=proc.stdout[:800],
+                )
+            candidates.extend(parsed)
             break  # first CLI that actually ran wins; don't double-search with both
         else:
             _log("WARNING", "No skills-search CLI (npx/uvx) available on PATH; only staging candidates considered", capability=capability_description)
 
+        _log("SKILL-DEBUG", "_search returning", capability=capability_description, total_candidates=len(candidates))
         return candidates
 
     def _search_staging(self, capability_description: str) -> list[Candidate]:
@@ -346,10 +390,13 @@ class SkillAcquisitionManager:
         construction (staged candidates are developer-placed, i.e.
         implicitly trusted for testing purposes)."""
         if not self.staging_root.is_dir():
+            _log("SKILL-DEBUG", "Staging root does not exist; skipping staging search", staging_root=str(self.staging_root))
             return []
         slug = self._slugify(capability_description)
         candidates: list[Candidate] = []
-        for entry in sorted(p for p in self.staging_root.iterdir() if p.is_dir()):
+        entries = sorted(p for p in self.staging_root.iterdir() if p.is_dir())
+        _log("SKILL-DEBUG", "Scanning staging root", staging_root=str(self.staging_root), entries=[e.name for e in entries], capability_slug=slug)
+        for entry in entries:
             entry_slug = self._slugify(entry.name)
             if slug in entry_slug or entry_slug in slug:
                 candidates.append(
@@ -360,6 +407,7 @@ class SkillAcquisitionManager:
                         url=f"file://{entry.resolve()}",
                     )
                 )
+        _log("SKILL-DEBUG", "Staging search matched", capability_slug=slug, matched=[c.skill_name for c in candidates])
         return candidates
 
     @staticmethod
@@ -417,6 +465,16 @@ class SkillAcquisitionManager:
         candidate if the first fails install/verification -- not just a
         single winner.
         """
+        dropped = [
+            c for c in candidates
+            if not (c.installs >= INSTALL_COUNT_FLOOR or self._owner(c.owner_repo) in TRUSTED_OWNER_ALLOWLIST)
+        ]
+        if dropped:
+            _log(
+                "SKILL-DEBUG", "Candidates dropped by hard gate",
+                dropped=[{"owner_repo": c.owner_repo, "skill_name": c.skill_name, "installs": c.installs} for c in dropped],
+                install_count_floor=INSTALL_COUNT_FLOOR, trusted_owners=sorted(TRUSTED_OWNER_ALLOWLIST),
+            )
         gated = [
             c for c in candidates
             if c.installs >= INSTALL_COUNT_FLOOR or self._owner(c.owner_repo) in TRUSTED_OWNER_ALLOWLIST
@@ -425,9 +483,14 @@ class SkillAcquisitionManager:
             return []
         gated.sort(key=lambda c: c.installs, reverse=True)
         if len(gated) == 1 or self.llm is None:
+            _log(
+                "SKILL-DEBUG", "Skipping LLM selection (single candidate or no LLM configured)",
+                gated_count=len(gated), llm_configured=self.llm is not None,
+            )
             return gated
 
         chosen_name = self._llm_select(gated[:5], task_description)
+        _log("SKILL-DEBUG", "LLM candidate selection result", chosen=chosen_name, considered=[c.skill_name for c in gated[:5]])
         if chosen_name is None:
             # LLM explicitly said "none of these fit" -- don't fall back to
             # guessing; an unwanted install is worse than a clean not_found.
@@ -506,6 +569,7 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
         has -- nothing about the calling contract changes between Phase A
         and Phase B.
         """
+        _log("SKILL-DEBUG", "_install dispatch", candidate=candidate.skill_name, owner_repo=candidate.owner_repo, is_staging=candidate.owner_repo.startswith("local/"))
         if candidate.owner_repo.startswith("local/"):
             _, _, staged_name = candidate.owner_repo.partition("/")
             source_dir = self.staging_root / staged_name
@@ -513,17 +577,21 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
                 raise FileNotFoundError(f"staged skill folder not found: {source_dir}")
             dest_dir = self._fresh_dest_dir(candidate.skill_name)
             shutil.copytree(source_dir, dest_dir)
+            _log("SKILL-DEBUG", "Installed from staging", candidate=candidate.skill_name, dest_dir=str(dest_dir))
             return dest_dir
 
         owner, _, repo = candidate.owner_repo.partition("/")
         found = self._install_from_cli(candidate)
         if found is not None:
+            _log("SKILL-DEBUG", "Installed via CLI", candidate=candidate.skill_name, dest_dir=str(found))
             return found
         _log(
             "SKILL-ACQUISITION", "CLI install did not land where expected; falling back to download API",
             candidate=candidate.skill_name, source=candidate.owner_repo, phase="installing",
         )
-        return self._install_from_download_api(owner, repo, candidate.skill_name)
+        dest_dir = self._install_from_download_api(owner, repo, candidate.skill_name)
+        _log("SKILL-DEBUG", "Installed via download API", candidate=candidate.skill_name, dest_dir=str(dest_dir))
+        return dest_dir
 
     def _fresh_dest_dir(self, skill_name: str) -> Path:
         """`github_skills/<skill_name>/`, cleared first if something's
@@ -550,30 +618,46 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
         `_install_and_verify_one`'s existing timeout handling still
         applies unchanged."""
         for cmd_prefix in SKILLS_ADD_CMD_CANDIDATES:
+            cmd = [*cmd_prefix, candidate.owner_repo, "--skill", candidate.skill_name, "-y", "--agent", "generic"]
+            _log("SKILL-DEBUG", "Attempting skills-add CLI", cmd=cmd, candidate=candidate.skill_name)
             try:
-                subprocess.run(
-                    [*cmd_prefix, candidate.owner_repo, "--skill", candidate.skill_name, "-y", "--agent", "generic"],
+                proc = subprocess.run(
+                    cmd,
                     capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS,
                 )
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                _log("SKILL-DEBUG", "install CLI binary not found on PATH; trying next candidate", cmd=cmd_prefix[0], error=str(e))
                 continue  # this CLI isn't installed in this runtime; try the next one
             # Not checking returncode here on purpose -- plan §4.7: a 0
             # exit doesn't guarantee a well-formed package and a nonzero
             # exit with partial output is possible either way, so
             # completion is decided by what's actually on disk below, not
             # by the exit code.
-            for landing_spot in (
+            _log(
+                "SKILL-DEBUG", "skills-add CLI returned",
+                cmd=cmd_prefix, exit_code=proc.returncode,
+                stdout_preview=proc.stdout[:500], stderr_preview=proc.stderr[:500],
+            )
+            landing_spots = (
                 Path("generic") / "skills" / candidate.skill_name,
                 Path.home() / "generic" / "skills" / candidate.skill_name,
                 Path("skills") / candidate.skill_name,
                 Path(candidate.skill_name),
-            ):
-                if (landing_spot / "SKILL.md").is_file():
+            )
+            for landing_spot in landing_spots:
+                found = (landing_spot / "SKILL.md").is_file()
+                _log("SKILL-DEBUG", "Checking landing spot", landing_spot=str(landing_spot.resolve()), skill_md_found=found)
+                if found:
                     dest_dir = self._fresh_dest_dir(candidate.skill_name)
                     shutil.copytree(landing_spot, dest_dir)
                     shutil.rmtree(landing_spot, ignore_errors=True)
                     return dest_dir
+            _log(
+                "SKILL-DEBUG", "CLI ran but SKILL.md not found in any known landing spot",
+                candidate=candidate.skill_name, checked=[str(p.resolve()) for p in landing_spots],
+            )
             return None  # CLI ran (or wasn't found at this landing spot); nothing usable found
+        _log("SKILL-DEBUG", "Neither npx nor uvx was available for skills-add", candidate=candidate.skill_name)
         return None  # neither npx nor uvx was available at all
 
     def _install_from_download_api(self, owner: str, repo: str, skill_name: str) -> Path:
@@ -585,9 +669,12 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
         construction rather than something `_verify`'s size/count check
         has to catch after the fact."""
         if requests is None:
+            _log("SKILL-DEBUG", "requests package not installed; download API fallback unavailable", skill=skill_name)
             raise RuntimeError("requests is not installed; cannot use the skill download API fallback")
         url = SKILLS_DOWNLOAD_API_TEMPLATE.format(owner=owner, repo=repo, skill=skill_name)
+        _log("SKILL-DEBUG", "Hitting skill download API", url=url)
         response = requests.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        _log("SKILL-DEBUG", "Download API responded", url=url, status_code=response.status_code, content_type=response.headers.get("Content-Type", ""), bytes=len(response.content))
         response.raise_for_status()
 
         dest_dir = self._fresh_dest_dir(skill_name)
@@ -621,19 +708,24 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
         call's reported success (plan §4.7/§4.9) -- a 0 exit code, or a
         stub copy that "succeeded", doesn't guarantee a well-formed
         package. Only a package that passes this gets indexed."""
+        _log("SKILL-DEBUG", "_verify starting", path=str(path))
         if not path.is_dir():
+            _log("SKILL-DEBUG", "_verify failed: install path is not a directory", path=str(path))
             return False, "incomplete_package: install path is missing"
 
         skill_md = path / "SKILL.md"
         if not skill_md.is_file():
+            _log("SKILL-DEBUG", "_verify failed: no SKILL.md at install path", path=str(path), contents=[p.name for p in path.iterdir()] if path.is_dir() else [])
             return False, "incomplete_package: missing SKILL.md"
 
         try:
             skill = self.skill_discovery._parse_skill_md(skill_md, source="github")
         except (OSError, UnicodeDecodeError) as e:
+            _log("SKILL-DEBUG", "_verify failed: SKILL.md parse error", path=str(skill_md), error=str(e))
             return False, f"incomplete_package: SKILL.md failed to parse ({e})"
 
         if not skill.name or not skill.description:
+            _log("SKILL-DEBUG", "_verify failed: missing name/description", path=str(skill_md), name=skill.name, description=skill.description)
             return False, "incomplete_package: SKILL.md is missing required name/description frontmatter"
 
         file_count = 0
@@ -642,12 +734,19 @@ Respond with ONLY JSON: {{"choice": "skill_name" or "none"}}
             if p.is_file():
                 file_count += 1
                 total_bytes += p.stat().st_size
+        _log("SKILL-DEBUG", "_verify package stats", path=str(path), file_count=file_count, total_bytes=total_bytes, skill_name=skill.name, trust=skill.trust)
         if file_count > MAX_PACKAGE_FILES or total_bytes > MAX_PACKAGE_BYTES:
+            _log(
+                "SKILL-DEBUG", "_verify failed: oversized package",
+                file_count=file_count, total_bytes=total_bytes,
+                max_files=MAX_PACKAGE_FILES, max_bytes=MAX_PACKAGE_BYTES,
+            )
             return False, (
                 f"incomplete_package: oversized fetch ({file_count} files, {total_bytes} bytes) "
                 f"-- likely grabbed more than one skill's worth of content"
             )
 
+        _log("SKILL-DEBUG", "_verify passed", path=str(path), skill_name=skill.name)
         return True, "ok"
 
     def _quarantine(self, path: Path) -> None:

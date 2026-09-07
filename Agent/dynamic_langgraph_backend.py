@@ -1385,12 +1385,13 @@ class DynamicAgentFactory:
         skipped with a warning; the skill's `instructions` still apply,
         just without its bundled tools.
         """
+        _log("SKILL-DEBUG", "_apply_skills called", requested_skill_names=skill_names, registry_size=len(self.skill_registry.skills))
         applied_skills: list[str] = []
         extra_tool_names: list[str] = []
         for name in skill_names:
             skill = self.skill_registry.get_skill(name)
             if skill is None:
-                _log("WARNING", "Selected skill not found in registry; skipping", skill=name)
+                _log("WARNING", "Selected skill not found in registry; skipping", skill=name, known_skills=list(self.skill_registry.skills.keys()))
                 continue
             applied_skills.append(name)
             extra_tool_names.extend(skill.tool_names)
@@ -1401,7 +1402,10 @@ class DynamicAgentFactory:
                         skill=name, source=skill.source, bundled_tools=[t.get("name") for t in skill.bundled_tool_specs],
                     )
                 else:
-                    extra_tool_names.extend(self._create_missing_tools(skill.bundled_tool_specs))
+                    created = self._create_missing_tools(skill.bundled_tool_specs)
+                    _log("SKILL-DEBUG", "Bundled tools created for trusted skill", skill=name, created=created)
+                    extra_tool_names.extend(created)
+        _log("SKILL-DEBUG", "_apply_skills result", applied_skills=applied_skills, extra_tool_names=extra_tool_names)
         return applied_skills, extra_tool_names
 
     @traceable(name="resolve_skill_gap", run_type="chain")
@@ -1422,9 +1426,12 @@ class DynamicAgentFactory:
         without that capability, same as if the LLM had returned no skill
         at all.
         """
+        _log("SKILL-DEBUG", "_resolve_skill_gap called", skill_gap=repr(skill_gap), task_description=task_description, acquisition_manager_configured=self.skill_acquisition is not None)
         if not skill_gap or self.skill_acquisition is None:
             if skill_gap:
                 _log("WARNING", "skill_gap reported but no SkillAcquisitionManager configured; ignoring", skill_gap=skill_gap)
+            else:
+                _log("SKILL-DEBUG", "No skill_gap reported by selection LLM this call")
             return [], []
 
         result: AcquisitionResult = self.skill_acquisition.ensure_skill(skill_gap, task_description)
@@ -1529,6 +1536,11 @@ Rules:
         if result is None:
             _log("WARNING", "Tool-refresh reply was not valid JSON; keeping current tools", role=role)
             return agent_conf
+        _log(
+            "SKILL-DEBUG", "refresh_tools LLM selection parsed",
+            role=role, requested_skills=result.get("skills", []), skill_gap=repr(result.get("skill_gap", "")),
+            available_skill_count=len(available_skills),
+        )
 
         created_tool_names = self._create_missing_tools(result.get("new_tools", []))
         applied_skill_names, skill_tool_names = self._apply_skills(result.get("skills", []) or [])
@@ -1633,6 +1645,11 @@ Rules:
                 "new_tools": [],
                 "skills": [],
             }
+        _log(
+            "SKILL-DEBUG", "create_agent LLM selection parsed",
+            role=role, requested_skills=config.get("skills", []), skill_gap=repr(config.get("skill_gap", "")),
+            available_skill_count=len(available_skills),
+        )
 
         created_tool_names = self._create_missing_tools(config.get("new_tools", []))
         applied_skill_names, skill_tool_names = self._apply_skills(config.get("skills", []) or [])
@@ -1700,13 +1717,29 @@ class DynamicAgentManager:
         add_skill()/the /skills management API (manual, for testing) and,
         as of Phase 2, via automatic folder discovery below."""
         self.skill_discovery = SkillDiscovery(self.skill_registry)
-        self.skill_discovery.index_all()
+        _log(
+            "SKILL-DEBUG", "Startup skill roots (relative to process cwd)",
+            cwd=str(Path.cwd()),
+            roots={source: {"path": str(p), "resolved": str(p.resolve()), "exists": p.is_dir()} for source, p in SKILL_ROOTS.items()},
+        )
+        index_results = self.skill_discovery.index_all()
+        _log(
+            "SKILL-DEBUG", "Startup skill discovery complete",
+            index_results=index_results, total_skills=len(self.skill_registry.skills),
+            known_skills=list(self.skill_registry.skills.keys()),
+        )
         """Phase 2: scan skills/, github_skills/, community_skills/, and
         project_skills/ once at startup. self.reindex_skills() re-runs
         this on demand (e.g. after dropping in a new SKILL.md without
         restarting); set_working_directory() below additionally indexes
         <workdir>/.skills/ whenever a thread selects a cowork folder."""
         self.skill_acquisition = SkillAcquisitionManager(self.skill_registry, self.skill_discovery)
+        _log(
+            "SKILL-DEBUG", "SkillAcquisitionManager configured",
+            github_skills_root=str(self.skill_acquisition.github_skills_root.resolve()),
+            staging_root=str(self.skill_acquisition.staging_root.resolve()),
+            llm_configured=self.skill_acquisition.llm is not None,
+        )
         """v2: live, runtime skill discovery/installation/verification,
         shared process-wide (one lock table, one cache) the same way
         tool_registry/skill_registry already are. Wired into agent_factory
@@ -2056,13 +2089,32 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
                 # task_messages, neither of which a plain BaseTool function
                 # can reach.
                 capability_description = tool_args.get("capability_description", "")
+                _log(
+                    "SKILL-DEBUG", "request_skill_acquisition tool invoked by agent",
+                    role=task["agent_role"], task_id=task["id"], capability=capability_description,
+                    acquisition_manager_configured=self.agent_factory.skill_acquisition is not None,
+                )
                 acquisition_result = self.agent_factory.skill_acquisition.ensure_skill(
                     capability_description, task["description"]
                 ) if self.agent_factory.skill_acquisition is not None else AcquisitionResult(
                     status="failed", skill_name=None, reason="no SkillAcquisitionManager configured",
                 )
+                _log(
+                    "SKILL-DEBUG", "request_skill_acquisition ensure_skill returned",
+                    capability=capability_description, status=acquisition_result.status,
+                    skill_name=acquisition_result.skill_name, reason=acquisition_result.reason,
+                )
                 if acquisition_result.status in ("installed", "already_present") and acquisition_result.skill_name:
+                    agent_conf_before = dict(self.agent_factory.agents.get(task["agent_role"], {}))
                     self.agent_factory.refresh_tools(task["agent_role"], task["description"])
+                    agent_conf_after = self.agent_factory.agents.get(task["agent_role"], {})
+                    _log(
+                        "SKILL-DEBUG", "refresh_tools after acquisition",
+                        role=task["agent_role"],
+                        skill_names_before=agent_conf_before.get("skill_names", []),
+                        skill_names_after=agent_conf_after.get("skill_names", []),
+                        acquired_skill_in_agent_skill_names=acquisition_result.skill_name in agent_conf_after.get("skill_names", []),
+                    )
                     directive = self.agent_factory.skill_directive([acquisition_result.skill_name])
                     if directive:
                         pending_skill_directives.append(directive)

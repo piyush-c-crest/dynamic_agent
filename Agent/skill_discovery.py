@@ -178,6 +178,13 @@ class SkillDiscovery:
         default_trust = "untrusted" if source in _UNTRUSTED_DEFAULT_SOURCES else "trusted"
         skill_dir = skill_md.parent
 
+        _log(
+            "SKILL-DEBUG", "Parsed SKILL.md frontmatter",
+            path=str(skill_md), name=name, source=source,
+            trust=frontmatter.get("trust", default_trust), tools=frontmatter.get("tools", ""),
+            bundled_tools_raw=frontmatter.get("bundled_tools", ""), triggers=frontmatter.get("triggers", ""),
+        )
+
         return Skill(
             name=name,
             description=description,
@@ -200,13 +207,17 @@ class SkillDiscovery:
         Returns how many skills were newly registered or refreshed from it."""
         root = Path(root)
         if not root.exists() or not root.is_dir():
+            _log("SKILL-DEBUG", "index_root: root does not exist on disk", root=str(root.resolve()), source=source)
             return 0
 
         resolved_root = root.resolve()
         registered = 0
-        for entry in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        entries = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        _log("SKILL-DEBUG", "index_root scanning", root=str(resolved_root), source=source, subfolders=[e.name for e in entries])
+        for entry in entries:
             skill_md = entry / "SKILL.md"
             if not skill_md.is_file():
+                _log("SKILL-DEBUG", "index_root: folder has no SKILL.md, skipping", folder=str(entry), source=source)
                 continue
             # Guard against a symlinked skill folder pointing outside its
             # own root -- discovery should only ever register skills that
@@ -219,8 +230,11 @@ class SkillDiscovery:
             except (OSError, UnicodeDecodeError) as e:
                 _log("WARNING", "Could not read SKILL.md", path=str(skill_md), error=str(e))
                 continue
-            if self.registry.register_skill(skill):
+            ok = self.registry.register_skill(skill)
+            _log("SKILL-DEBUG", "index_root: register_skill result", skill=skill.name, source=source, registered=ok)
+            if ok:
                 registered += 1
+        _log("SKILL-DEBUG", "index_root finished", root=str(resolved_root), source=source, registered=registered)
         return registered
 
     def index_single(self, skill_dir: Path, source: str = "github") -> Skill | None:
@@ -240,6 +254,7 @@ class SkillDiscovery:
         """
         skill_dir = Path(skill_dir)
         skill_md = skill_dir / "SKILL.md"
+        _log("SKILL-DEBUG", "index_single called", skill_dir=str(skill_dir), source=source)
         if not skill_md.is_file():
             _log("WARNING", "index_single: no SKILL.md in target folder", path=str(skill_dir))
             return None
@@ -248,7 +263,12 @@ class SkillDiscovery:
         except (OSError, UnicodeDecodeError) as e:
             _log("WARNING", "index_single: could not read SKILL.md", path=str(skill_md), error=str(e))
             return None
-        self.registry.register_skill(skill)
+        ok = self.registry.register_skill(skill)
+        _log(
+            "SKILL-DEBUG", "index_single: register_skill result",
+            skill=skill.name, source=source, registered=ok, tool_names=skill.tool_names,
+            trust=skill.trust, bundled_tools=[t.get("name") for t in skill.bundled_tool_specs],
+        )
         return skill
 
     def index_workdir(self, workdir: Path) -> int:
