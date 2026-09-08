@@ -188,40 +188,27 @@ if not os.environ.get("LANGCHAIN_API_KEY"):
 
 MAX_RETRIES = 2
 MAX_TASKS = 6
-AUTO_TOOL_LIMIT = 2  # max new tools an agent's tool-selection step may auto-create per call
-MAX_TOOL_VALIDATION_RETRIES = 3  # repair attempts if a generated tool fails its smoke test
-MAX_TOOL_CALLS_PER_TASK = 10  # default cap; see TOOL_CALL_LIMIT_OVERRIDES for role-specific budgets
-# Roles doing multi-step, multi-file work (moving/renaming a whole folder,
-# verifying the result) burn through the default 10-call budget on
-# exploration alone and get force-cut before they've done anything, which
-# then produces a text-only "final answer" describing work that never
-# happened. Give those roles a larger budget; everything else keeps the
-# tighter default (still a hard ceiling, still prevents infinite loops).
+AUTO_TOOL_LIMIT = 2 
+MAX_TOOL_VALIDATION_RETRIES = 3  
+MAX_TOOL_CALLS_PER_TASK = 5   
 TOOL_CALL_LIMIT_OVERRIDES = {
     "executor": 25,
     "verifier": 20,
+    "researcher": 6,  
+    "writer": 4,     
 }
-# Tools whose successful invocation is actual, checkable evidence that the
-# agent DID something (moved/renamed/wrote/ran a command) rather than just
-# looked around or described a plan. Used by the evaluator to distinguish
-# a real result from a confident-sounding narrative.
 MUTATING_TOOL_NAMES = {"run_shell_command", "write_file", "generate_document", "create_artifact"}
-MAX_READ_CHARS = 20_000  # cap for read_file output so large files don't blow the prompt
+MAX_READ_CHARS = 20_000 
 MAX_LIST_ENTRIES = 500
-# Any dict-valued tool result field longer than this (e.g. a base64 image
-# blob) gets stripped out of what's persisted into ToolMessage/task_messages
-# history -- history is resent to the LLM on EVERY subsequent turn of the
-# task, so an unstripped 30-45k char base64 string here costs ~8-12k tokens
-# PER TURN, PER PRIOR CHART, and compounds fast (see generate_chart bug,
-# SKILL-DEBUG log tag "TOOL-DEBUG"). 2000 chars is generous headroom for any
-# legitimate short field while still catching base64 image/binary payloads.
 MAX_TOOL_RESULT_FIELD_CHARS = 2_000
 SHELL_TIMEOUT = 60  # default seconds before run_shell_command kills the process
 SHELL_TIMEOUT_CAP = 300  # hard ceiling regardless of what the caller requests
 MAX_SHELL_OUTPUT_CHARS = 20_000  # cap for stdout/stderr each, same reasoning as MAX_READ_CHARS
 
 llm = ChatOpenAI(
-    model="openai.gpt-oss-120b"
+    model="openai.gpt-oss-120b", 
+    timeout=290,
+    max_retries=2,
 )
 
 
@@ -258,14 +245,6 @@ def _guess_mime_from_path(path: str) -> str:
         "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
     }.get(ext, "image/png")
 
-
-# Field-name conventions seen across different tools for "here's a base64
-# image blob" -- checked in order, first match wins. Kept separate from the
-# explicit "is_image" contract (used by view_image) so tools that don't
-# opt in (e.g. generate_chart, which returns {"file_path":..., "base64_image":...}
-# with no "is_image" key) still get routed through the one-turn image path
-# instead of falling through to str(result) and permanently bloating
-# task_messages history with a 25-45k char base64 string on every call.
 _IMAGE_B64_FIELD_CANDIDATES = ("base64_image", "data_b64", "image_base64", "base64")
 
 
@@ -468,11 +447,6 @@ class DynamicToolRegistry:
         self.register_tool("create_artifact", self._create_artifact_tool())
         self.register_tool("update_tasks", self._update_tasks_tool())
         self.register_tool("request_skill_acquisition", self._request_skill_acquisition_tool())
-        # NOTE: "read_skill_resource" is intentionally NOT registered here --
-        # unlike every other built-in tool it needs a live SkillRegistry
-        # reference (to resolve skill_name -> skill.path), which this class
-        # doesn't own. DynamicAgentManager.__init__ registers it right after
-        # constructing self.skill_registry -- see that constructor.
 
     def list_artifacts(self) -> list[dict]:
         return list(self.artifacts)
@@ -1634,18 +1608,34 @@ Rules:
         _log("AGENT", "Agent tool set refreshed", role=role, tools=agent_conf["tool_names"], skills=agent_conf["skill_names"])
         return agent_conf
 
-    def tool_directive(self, tool_names: list[str]) -> str:
+    def tool_directive(self, tool_names: list[str], role: str = "") -> str:
         """Fixed instruction appended to every agent's system prompt to force tool use when relevant."""
         if not tool_names:
             return ""
         descriptions = self.tool_registry.list_tools()
         lines = [f'- {name}: {descriptions.get(name, "")}' for name in tool_names]
+        budget = _tool_call_limit_for_role(role) if role else MAX_TOOL_CALLS_PER_TASK
         return (
             "\n\nTOOL USE GUIDELINES:\n"
             + "\n".join(lines)
-            + "\n\n1. If completing this task requires external or live data (prices, search results, computation), call the appropriate tool above.\n"
-            "2. CRITICAL: If you have already executed a tool call and received results in a ToolMessage, DO NOT call the tool again for the same query. Synthesize your final answer using the retrieved results immediately.\n"
-            "3. Do NOT make redundant or repeated tool calls once information has been fetched."
+            + f"\n\nYou have a budget of {budget} tool calls total for this task. Plan accordingly.\n"
+            "0. PARALLELISM — MOST IMPORTANT RULE: When you need multiple independent pieces of "
+            "information, emit ALL the required tool calls in a SINGLE response. Do NOT wait for "
+            "result A before requesting B. Example: if you need specs for car A AND car B, "
+            "issue both search calls at once in the same turn — this halves your budget usage.\n"
+            "1. SCOPE YOUR TASK: If the task asks for a large list (e.g. 20 items), each needing "
+            "individual data, use your budget to get a broad overview in 1-2 searches, then "
+            "synthesise a best-effort answer from those results. Do NOT try to do one search per item.\n"
+            "2. If completing this task requires external or live data (prices, search results, "
+            "computation), call the appropriate tool above.\n"
+            "3. ANTI-REDUNDANCY: Before issuing ANY tool call, check whether existing ToolMessage "
+            "results already answer the question or provide enough data to synthesize a final answer. "
+            "Do NOT rephrase or slightly reword a query you already ran — that wastes budget.\n"
+            "4. STOP EARLY: As soon as you have enough information to answer the task, produce your "
+            "final answer immediately. Do not keep searching for extra validation.\n"
+            "5. NOTE on search results: the search tool returns text snippets only — there are no "
+            "clickable URLs in its output. Cite the data you found as '[search result]' rather than "
+            "inventing or promising a URL you do not have."
         )
 
     @traceable(name="create_agent", run_type="chain")
@@ -1906,15 +1896,33 @@ class DynamicAgentManager:
         planning_prompt = f"""
 You are A Dynamic Agent Called : Crest
 You are a task planning system for a multi-agent orchestrator.
-Break the goal below into a short sequence of atomic, actionable tasks.
+Break the goal below into a minimal sequence of atomic, actionable tasks.
 For each task, assign an "agent_role": a short label for the kind of
-specialist needed (e.g. "researcher", "calculator", "analyst", "writer").
+specialist needed (e.g. "researcher", "analyst", "writer").
 Reuse the same role across tasks when it genuinely fits the same specialty.
 
+PREFER FEWER TASKS:
+- If a single agent can handle the entire goal in one pass (e.g., research a
+  topic AND write a summary about it), plan ONE task with a combined
+  description. Do NOT split into separate researcher + writer tasks unless
+  the raw output of step N is a required structured input to step N+1 and
+  they need genuinely different specialized tools.
+- Only split when there is a true data dependency between steps.
+
+TASK SCOPE AWARENESS:
+- Each agent has a limited tool-call budget (typically 4-6 searches). Scope
+  each task to be achievable within that budget.
+- If the user asks for a "top 20" list, the task should instruct the agent to
+  do a best-effort overview using broad searches — NOT one search per item.
+  Write the task description to reflect this: e.g. "Research the top electric
+  cars of 2025 using broad overview searches and compile a best-effort
+  summary" rather than "compile a complete list with full specs for 20 models".
+- NEVER write a task that implicitly requires more searches than the budget.
+
 If the conversation history below already contains the information needed to
-answer the goal plan a
-single task that answers directly from that history — do NOT plan tasks that
-invent a way to "store" or "look up" data; you already have the transcript.
+answer the goal, plan a single task that answers directly from that history
+— do NOT plan tasks that invent a way to "store" or "look up" data; you
+already have the transcript.
 {history_note}
 
 Goal: "{goal}"{style_note}{extra_note}
@@ -1980,7 +1988,7 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
             # Regenerate the tool/skill directives fresh so they reflect the agent's current tools/skills
             full_system_prompt = (
                 agent["system_prompt"]
-                + self.agent_factory.tool_directive(agent["tool_names"])
+                + self.agent_factory.tool_directive(agent["tool_names"], role=role)
                 + self.agent_factory.skill_directive(agent.get("skill_names", []))
             )
             attachments = state.get("attachments") or []
@@ -1999,10 +2007,6 @@ Use between 1 and {MAX_TASKS} tasks. Keep each task atomic.
         tool_call_limit = _tool_call_limit_for_role(role)
         tool_calls_baseline = state.get("tool_calls_baseline", 0)
         tool_results_count_total = sum(1 for m in task_messages if isinstance(m, ToolMessage))
-        # Budget is per-attempt: subtract whatever tool calls already
-        # existed at the start of this retry (see tool_calls_baseline
-        # docstring on OrchestratorState) so a fresh retry actually gets
-        # its own tool-call budget instead of inheriting an exhausted one.
         tool_results_count = tool_results_count_total - tool_calls_baseline
         forced_cutoff = tool_results_count >= tool_call_limit
         if forced_cutoff:
@@ -2349,6 +2353,17 @@ Agent output: {final_content}
 Ground truth from the execution trace (not the agent's own words):
 {evidence_line}
 
+IMPORTANT — Tool output limitations you must understand before evaluating:
+- The "search" tool returns short text SNIPPETS only. It does NOT return
+  clickable URLs or citable source links. An agent that searched and
+  synthesised its findings without URLs has done this correctly — do NOT
+  retry just because there are no hyperlinks or formal citations.
+- For RESEARCH / COMPARISON tasks: PASS if the agent called search at least
+  once and produced a substantive answer. Retry only if the answer is
+  factually empty or completely off-topic.
+- For FILE / COMMAND tasks: PASS only if the appropriate mutating tool was
+  actually invoked (write_file, run_shell_command, generate_document, etc.).
+
 Does this output satisfactorily complete the task? A confident description of
 work being done is NOT evidence that it happened -- only an actual tool
 invocation is. If the task requires taking or verifying an action
@@ -2375,10 +2390,6 @@ Respond with ONLY JSON:
         _log_block("AI-REPLY", f"Raw evaluator reply for task {task['id']}", _as_text(eval_response.content))
         verdict = parse_json_safely(
             eval_response.content,
-            # Fail CLOSED, not open: an unparseable verdict used to
-            # auto-PASS, silently accepting whatever the agent said. Treat
-            # it as a RETRY instead so a parsing hiccup can't masquerade as
-            # a verified success.
             default={
                 "status": "RETRY",
                 "reason": "auto-retry (unparseable evaluator verdict; failing closed rather than silently accepting)",
@@ -2387,11 +2398,20 @@ Respond with ONLY JSON:
         )
         _log("WORKFLOW", "Task evaluation completed", task_id=task["id"], verdict=verdict, tools_invoked=tools_invoked)
 
-        # Hard, code-level safety net: don't let an LLM verdict of PASS
-        # override a clear-cut absence of the actions the task actually
-        # required. This is exactly the pattern that fooled the evaluator
-        # before -- a fully-written "old path -> new path, moved" report
-        # backed by zero run_shell_command/write_file calls.
+        if verdict.get("status") == "RETRY" and forced_cutoff and tools_invoked:
+            final_text_len = len(final_content.strip())
+            if final_text_len > 200:  # agent produced a substantive best-effort answer
+                _log(
+                    "WARNING",
+                    "Evaluator RETRY overridden to PASS: agent hit budget but produced substantive best-effort answer",
+                    task_id=task["id"], role=role, answer_chars=final_text_len, tools_called=len(tools_invoked),
+                )
+                verdict = {
+                    "status": "PASS",
+                    "reason": "Budget-wall override: agent used all tool calls and produced a substantive answer; further retries cannot improve results.",
+                    "feedback": "",
+                }
+
         if verdict.get("status") == "PASS" and mutating_available and not mutating_invoked:
             _log(
                 "WARNING",
@@ -2421,20 +2441,10 @@ Respond with ONLY JSON:
                 "task_messages": state["task_messages"] + [feedback_msg],
                 "messages": [feedback_msg],
                 "retry_count": retry_count + 1,
-                # Everything counted as a ToolMessage up to this point
-                # belongs to the attempt that just got graded -- move the
-                # baseline up so the retry starts its tool-call budget at
-                # zero instead of inheriting the exhausted count.
                 "tool_calls_baseline": len(tool_msgs_all),
                 "last_verdict": verdict,
             }
 
-        # Result accepted: either a genuine PASS, or retries exhausted.
-        # These are no longer treated as equivalent -- a task that's still
-        # failing when the retry budget runs out gets flagged explicitly
-        # instead of being silently folded into the results as if it
-        # succeeded, so the assembler (and any later task that reads this
-        # one's context) can see and report the real state.
         unverified = verdict.get("status") != "PASS"
         results = dict(state.get("task_results", {}))
         stored_content = final_content
